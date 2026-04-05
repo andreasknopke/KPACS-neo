@@ -32,6 +32,7 @@ public partial class StudyViewerWindow
     // ── Segmentation panel state ─────────────────────────────────
 
     private PluginManager? _pluginManager;
+    private bool _pluginDiscoveryStarted;
     private bool _segmentationSectionExpanded = true;
     private string? _selectedSegmentationPluginId;
     private string? _selectedSegmentationTaskId;
@@ -39,54 +40,33 @@ public partial class StudyViewerWindow
     private CancellationTokenSource? _segmentationCancellation;
 
     /// <summary>
-    /// Ensure the shared <see cref="PluginManager"/> is initialized.
-    /// Lazily creates it the first time the segmentation panel is used.
-    /// In thin-client mode, also queries the render server for remote plugins.
+    /// Asynchronously register remote (render-server) plugins and refresh the
+    /// anatomy panel when done. Called fire-and-forget from
+    /// <see cref="BuildSegmentationSection"/> in thin-client mode.
     /// </summary>
-    private async Task<PluginManager> EnsurePluginManagerAsync(CancellationToken ct = default)
+    private async Task RegisterRemotePluginsAndRefreshAsync()
     {
-        if (_pluginManager is not null)
+        try
         {
-            return _pluginManager;
+            if (_pluginManager is null || _context.RenderServerConnection is null)
+            {
+                return;
+            }
+
+            using var channel = RenderServerGrpcClientFactory.CreateChannel(
+                _context.RenderServerConnection.ServerUrl);
+
+            await _pluginManager.RegisterRemotePluginsAsync(
+                channel, string.Empty, string.Empty);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[Segmentation] Failed to discover remote plugins: {ex.Message}");
         }
 
-        string scratchRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "KPACS.Viewer.Avalonia", "plugin-scratch");
-
-        string appDir = (Application.Current as App)?.Paths.ApplicationDirectory
-            ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-
-        _pluginManager = new PluginManager(scratchRoot, dataDirectory: appDir);
-
-        // Discover local plugins (Plugins/ folder next to the executable).
-        string localPluginDir = Path.Combine(AppContext.BaseDirectory, "Plugins");
-        _pluginManager.DiscoverPlugins(localPluginDir);
-
-        // Also scan a user-level plugin directory.
-        string userPluginDir = Path.Combine(appDir, "Plugins");
-        _pluginManager.DiscoverPlugins(userPluginDir);
-
-        // If we are in thin-client mode, query the render server for remote plugins.
-        if (IsRenderServerStudy && _context.RenderServerConnection is not null)
-        {
-            try
-            {
-                using var channel = RenderServerGrpcClientFactory.CreateChannel(
-                    _context.RenderServerConnection.ServerUrl);
-
-                // We need a session+volume context for remote plugin calls.
-                // For now, use empty strings — the UI will set them before running.
-                await _pluginManager.RegisterRemotePluginsAsync(channel, string.Empty, string.Empty, ct);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[PluginManager] Failed to discover remote plugins: {ex.Message}");
-            }
-        }
-
-        return _pluginManager;
+        // Rebuild the panel on the UI thread so newly discovered remote plugins appear.
+        await Dispatcher.UIThread.InvokeAsync(() => RefreshAnatomyPanel());
     }
 
     // ── UI construction ──────────────────────────────────────────
@@ -97,6 +77,37 @@ public partial class StudyViewerWindow
     /// </summary>
     private Control BuildSegmentationSection()
     {
+        // Lazily create the plugin manager and run synchronous local discovery.
+        if (_pluginManager is null && !_pluginDiscoveryStarted)
+        {
+            _pluginDiscoveryStarted = true;
+
+            string scratchRoot = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "KPACS.Viewer.Avalonia", "plugin-scratch");
+
+            string appDir = (Application.Current as App)?.Paths.ApplicationDirectory
+                ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+
+            _pluginManager = new PluginManager(scratchRoot, dataDirectory: appDir);
+
+            // Synchronous local discovery.
+            string localPluginDir = Path.Combine(AppContext.BaseDirectory, "Plugins");
+            int localCount = _pluginManager.DiscoverPlugins(localPluginDir);
+            System.Diagnostics.Debug.WriteLine(
+                $"[Segmentation] Discovered {localCount} local plugin(s) from {localPluginDir}");
+
+            string userPluginDir = Path.Combine(appDir, "Plugins");
+            _pluginManager.DiscoverPlugins(userPluginDir);
+
+            // Async remote plugin registration (thin-client mode) — fire-and-forget,
+            // refresh the panel when done.
+            if (IsRenderServerStudy && _context.RenderServerConnection is not null)
+            {
+                _ = RegisterRemotePluginsAndRefreshAsync();
+            }
+        }
+
         IReadOnlyCollection<PluginInstance> allPlugins = _pluginManager?.Plugins ?? [];
         IReadOnlyList<PluginInstance> segmentationPlugins = allPlugins
             .Where(p => p.Manifest.Capabilities.HasFlag(PluginCapability.Segmentation))
