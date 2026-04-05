@@ -219,6 +219,14 @@ public sealed class PluginManager : IAsyncDisposable
             return instance.Handle;
         }
 
+        // Clean up any previous (faulted or stopped) handle before restarting.
+        if (instance.Handle is not null)
+        {
+            try { await instance.Handle.DisposeAsync(); }
+            catch { /* best-effort cleanup */ }
+            instance.Handle = null;
+        }
+
         instance.State = PluginState.Starting;
         PluginsChanged?.Invoke();
 
