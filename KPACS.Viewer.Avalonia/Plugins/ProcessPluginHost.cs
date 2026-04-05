@@ -54,6 +54,17 @@ internal sealed class ProcessPluginHost : IAsyncDisposable
         // Resolve the command (handles "python" → actual interpreter on this OS).
         (string resolvedCommand, string[] extraArgs) = ResolveCommand(runtime.Type, runtime.Command);
 
+        // Auto-install Python dependencies before launching.
+        if (string.Equals(runtime.Type, "python", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(runtime.RequirementsFile))
+        {
+            string reqPath = Path.GetFullPath(Path.Combine(_pluginDirectory, runtime.RequirementsFile));
+            if (File.Exists(reqPath))
+            {
+                await InstallPipRequirementsAsync(resolvedCommand, extraArgs, reqPath, workingDir, ct);
+            }
+        }
+
         // Build argument list, replacing ${port} token with "0" (plugin picks a free port).
         List<string> args = [
             .. extraArgs,
@@ -194,6 +205,54 @@ internal sealed class ProcessPluginHost : IAsyncDisposable
     private static string Truncate(string value, int maxLength)
     {
         return value.Length <= maxLength ? value : value[..maxLength] + "…";
+    }
+
+    // ── Pip dependency installation ──────────────────────────────
+
+    /// <summary>
+    /// Run <c>pip install -r requirements.txt</c> (or equivalent) to ensure
+    /// the plugin's Python dependencies are present before launch.
+    /// </summary>
+    private static async Task InstallPipRequirementsAsync(
+        string pythonCommand, string[] pythonExtraArgs, string requirementsPath,
+        string workingDir, CancellationToken ct)
+    {
+        // Build: python [-3] -m pip install --quiet -r requirements.txt
+        List<string> pipArgs = [.. pythonExtraArgs, "-m", "pip", "install", "--quiet", "-r", requirementsPath];
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = pythonCommand,
+            Arguments = string.Join(' ', pipArgs.Select(QuoteArg)),
+            WorkingDirectory = workingDir,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+
+        Debug.WriteLine($"[ProcessPluginHost] Installing pip requirements: {psi.FileName} {psi.Arguments}");
+
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException("Failed to start pip install process.");
+
+        // Drain stdout/stderr so the process doesn't block.
+        Task<string> stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
+        Task<string> stderrTask = proc.StandardError.ReadToEndAsync(ct);
+
+        await proc.WaitForExitAsync(ct);
+        string stdout = await stdoutTask;
+        string stderr = await stderrTask;
+
+        if (proc.ExitCode != 0)
+        {
+            Debug.WriteLine($"[ProcessPluginHost] pip install failed (exit {proc.ExitCode}): {Truncate(stderr, 500)}");
+            throw new InvalidOperationException(
+                $"Failed to install plugin Python dependencies (pip exit code {proc.ExitCode}). " +
+                $"{Truncate(stderr, 400)}");
+        }
+
+        Debug.WriteLine($"[ProcessPluginHost] pip install succeeded. {Truncate(stdout, 200)}");
     }
 
     // ── Python / command resolution ──────────────────────────────

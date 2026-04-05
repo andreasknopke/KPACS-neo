@@ -3649,10 +3649,18 @@ public partial class StudyViewerWindow : Window
     private static TimeSpan GetToastDuration(ToastSeverity severity) => severity switch
     {
         ToastSeverity.Success => TimeSpan.FromSeconds(4),
-        ToastSeverity.Warning => TimeSpan.FromSeconds(6),
-        ToastSeverity.Error => TimeSpan.FromSeconds(8),
+        ToastSeverity.Warning => TimeSpan.FromSeconds(8),
+        ToastSeverity.Error => TimeSpan.FromSeconds(20),
         _ => TimeSpan.FromSeconds(4),
     };
+
+    private async void OnToastCopyClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string message } && Clipboard is { } clipboard)
+        {
+            await clipboard.SetTextAsync(message);
+        }
+    }
 
     private static ToastNotificationItem CreateToast(string message, ToastSeverity severity)
     {

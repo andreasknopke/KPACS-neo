@@ -572,7 +572,7 @@
                               HorizontalAlignment="Right"
                               VerticalAlignment="Top"
                               Margin="0,16,16,0"
-                              IsHitTestVisible="False">
+                              IsHitTestVisible="True">
                         <ItemsControl.ItemsPanel>
                                 <ItemsPanelTemplate>
                                         <StackPanel Spacing="8" />
@@ -586,17 +586,28 @@
                                                 CornerRadius="8"
                                                 Padding="10,8"
                                                 MinWidth="260"
-                                                MaxWidth="420"
+                                                MaxWidth="480"
                                                 BoxShadow="0 8 20 0 #50000000">
-                                                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                                                <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10">
                                                         <TextBlock Text="{Binding Icon}"
                                                                    FontSize="16"
                                                                    VerticalAlignment="Top"
                                                                    Foreground="{Binding Foreground}" />
-                                                        <TextBlock Grid.Column="1"
+                                                        <SelectableTextBlock Grid.Column="1"
                                                                    Text="{Binding Message}"
                                                                    TextWrapping="Wrap"
                                                                    Foreground="{Binding Foreground}" />
+                                                        <Button Grid.Column="2"
+                                                                Content="📋"
+                                                                VerticalAlignment="Top"
+                                                                Tag="{Binding Message}"
+                                                                Click="OnToastCopyClick"
+                                                                Background="Transparent"
+                                                                BorderThickness="0"
+                                                                Padding="4,2"
+                                                                Cursor="Hand"
+                                                                FontSize="14"
+                                                                ToolTip.Tip="Copy to clipboard" />
                                                 </Grid>
                                         </Border>
                                 </DataTemplate>
