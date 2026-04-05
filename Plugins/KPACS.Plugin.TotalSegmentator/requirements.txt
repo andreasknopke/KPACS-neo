@@ -1,0 +1,6 @@
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+protobuf>=4.25.0
+TotalSegmentator>=2.13.0
+nibabel>=5.0.0
+numpy>=1.24.0

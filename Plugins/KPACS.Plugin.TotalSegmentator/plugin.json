@@ -1,0 +1,93 @@
+{
+  "id": "totalsegmentator",
+  "name": "TotalSegmentator",
+  "version": "2.13.0",
+  "author": "Jakob Wasserthal et al. (University Hospital Basel)",
+  "description": "Automatic segmentation of 117 anatomical structures in CT and MR images using nnU-Net models. Cite: https://pubs.rsna.org/doi/10.1148/ryai.230024",
+  "license": "Apache-2.0",
+  "capabilities": "Segmentation",
+
+  "runtime": {
+    "type": "python",
+    "command": "python",
+    "args": ["server.py", "--port", "${port}"],
+    "workingDirectory": ".",
+    "requirementsFile": "requirements.txt",
+    "environmentVariables": {}
+  },
+
+  "segmentationTasks": [
+    {
+      "id": "total",
+      "name": "Total (104 structures, CT)",
+      "description": "Full-body CT segmentation: organs, vertebrae, ribs, muscles, vessels at 1.5 mm resolution.",
+      "supportedModalities": ["CT"],
+      "structureCount": 104,
+      "requiresLicense": false
+    },
+    {
+      "id": "total_fast",
+      "name": "Total Fast (104 structures, CT, 3 mm)",
+      "description": "Same classes as 'total' but at 3 mm resolution — faster, lower memory.",
+      "supportedModalities": ["CT"],
+      "structureCount": 104,
+      "requiresLicense": false
+    },
+    {
+      "id": "total_mr",
+      "name": "Total MR (104 structures)",
+      "description": "Full-body MR segmentation at 1.5 mm resolution.",
+      "supportedModalities": ["MR"],
+      "structureCount": 104,
+      "requiresLicense": false
+    },
+    {
+      "id": "lung_vessels",
+      "name": "Lung Vessels",
+      "description": "Lung airways, airway walls, arteries, and veins.",
+      "supportedModalities": ["CT"],
+      "structureCount": 4,
+      "requiresLicense": false
+    },
+    {
+      "id": "heartchambers_highres",
+      "name": "Heart Chambers (High-Res)",
+      "description": "High-resolution cardiac chamber segmentation.",
+      "supportedModalities": ["CT"],
+      "structureCount": 16,
+      "requiresLicense": false
+    },
+    {
+      "id": "cerebral_bleed",
+      "name": "Cerebral Bleed",
+      "description": "Intracerebral hemorrhage detection and segmentation.",
+      "supportedModalities": ["CT"],
+      "structureCount": 2,
+      "requiresLicense": false
+    },
+    {
+      "id": "coronary_arteries",
+      "name": "Coronary Arteries",
+      "description": "Coronary artery segmentation from CTA.",
+      "supportedModalities": ["CT"],
+      "structureCount": 3,
+      "requiresLicense": false
+    },
+    {
+      "id": "tissue_types",
+      "name": "Tissue Types",
+      "description": "Subcutaneous fat, muscle, visceral fat, bone, etc.",
+      "supportedModalities": ["CT"],
+      "structureCount": 5,
+      "requiresLicense": true
+    },
+    {
+      "id": "body",
+      "name": "Body Region",
+      "description": "Body trunk and extremity segmentation (used for cropping).",
+      "supportedModalities": ["CT"],
+      "structureCount": 3,
+      "requiresLicense": false
+    }
+  ]
+}

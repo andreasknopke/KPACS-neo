@@ -57,12 +57,20 @@ KPACS.Viewer.Avalonia/          — Cross-platform study browser + DICOM viewer 
 │   ├── DicomPseudonymizationService.cs — Pseudonymize imported studies in-place
 │   ├── DicomRemoteStudyBrowserService.cs — Remote C-FIND/C-MOVE/C-STORE integration with queued background send
 │   ├── NetworkSettingsService.cs — Persistent network-settings.json management
+│   ├── NiftiMaskConverter.cs     — NIfTI-1 → SegmentationMask3D converter for plugin output
 │   ├── RemoteStudyRetrievalSession.cs — Progressive representative-image-first retrieval
 │   ├── StorageScpService.cs      — Local Storage SCP receiver with import pipeline
 │   ├── VolumeLoaderService.cs    — Series-to-volume loader for axial/coronal/sagittal reconstruction
 │   ├── VolumeRegistrationService.cs — Lightweight translation-based prior/cross-modality registration for linked navigation
 │   ├── ViewerStudyContext.cs     — Study viewer input context
 │   └── WindowPlacementService.cs — Window geometry persistence
+├── Plugins/
+│   ├── PluginManager.cs          — Central plugin registry: discovery, lifecycle, and remote plugin merging
+│   ├── PluginInstance.cs         — Per-plugin bookkeeping: manifest, directory, state, handle
+│   ├── ProcessPluginHost.cs      — Out-of-process plugin spawner (child process + gRPC port scanning)
+│   ├── GrpcPluginAdapter.cs      — Bridges IPlugin/ISegmentationProvider/IImageProcessor/IDicomAnalyzer to gRPC
+│   ├── RemotePluginAdapter.cs    — Thin-client adapter forwarding plugin calls to render server
+│   └── InProcessPluginLoader.cs  — .NET plugin loader via isolated AssemblyLoadContext
 ├── Windows/
     ├── NetworkInfoWindow.cs      — Runtime network status dialog
     └── NetworkSettingsWindow.cs  — Network configuration dialog
@@ -75,12 +83,34 @@ KPACS.Viewer.Avalonia/          — Cross-platform study browser + DICOM viewer 
     ├── VolumeSlicePlane.cs       — Shared oblique plane geometry for tilted volume navigation
     └── VolumeTransferFunction.cs — DVR transfer-function presets for CT/PET-style rendering
 
-KPACS.RenderServer.Protos/      — Shared gRPC contracts for remote rendering and remote study browsing
+KPACS.SDK/                      — Zero-dependency plugin contract library (.NET 10)
+├── IPlugin.cs                    — Core plugin interface: InitializeAsync, ShutdownAsync, lifecycle
+├── PluginManifest.cs             — Plugin identity, capabilities, runtime, and task catalogue
+├── PluginCapability.cs           — Flags enum: Segmentation, ImageProcessing, DicomAnalysis, DicomCommunication
+├── PluginHostContext.cs          — Host-provided context: scratch dir, data dir, version
+├── PluginState.cs                — Lifecycle states: Discovered → Starting → Ready → Busy → Faulted → Stopped
+├── Contracts/                    — Capability interfaces: ISegmentationProvider, IImageProcessor, IDicomAnalyzer, IDicomCommunicationHandler
+└── Models/                       — Shared DTOs: SegmentationRequest/Result, SegmentedStructure, VolumeDescriptor, ProgressReport, etc.
+
+KPACS.SDK.Grpc/                 — Language-agnostic gRPC bridge for out-of-process plugins (.NET 10)
+└── Protos/plugin_service.proto   — PluginService: GetManifest, Initialize, Shutdown, RunSegmentation, ProcessImage, AnalyzeDicom
+
+KPACS.RenderServer.Protos/      — Shared gRPC contracts for remote rendering, study browsing, and plugin proxy
+└── Protos/
+    ├── render_service.proto      — Session, volume, render, input, study-browser services
+    └── plugin_proxy_service.proto — PluginProxyService: ListPlugins, GetSegmentationTasks, RunSegmentation, GetMaskData
 
 KPACS.RenderServer/             — Headless remote rendering and imagebox-backed study-browsing service (.NET 10)
-├── Program.cs                    — ASP.NET Core/gRPC host entry point
-├── appsettings.json              — Default server URL and imagebox database settings
-└── Services/                     — Session lifecycle, volume loading, render orchestration, and study-browser services
+├── Program.cs                    — ASP.NET Core/gRPC host entry point with PluginManager and PluginProxyService
+├── appsettings.json              — Default server URL, imagebox database, and plugin directory settings
+└── Services/                     — Session lifecycle, volume loading, render orchestration, study-browser, and plugin proxy services
+
+Plugins/                         — Reference plugin implementations
+└── KPACS.Plugin.TotalSegmentator/ — Python-based TotalSegmentator plugin (gRPC sidecar)
+    ├── plugin.json                — Plugin manifest declaring segmentation capabilities
+    ├── server.py                  — gRPC server entry point (KPACS_PLUGIN_PORT protocol)
+    ├── totalseg_bridge.py         — TotalSegmentator integration bridge
+    └── requirements.txt           — Python dependencies
 
 VolumeRenderingPresetCatalog.cs  — Catalog for DVR presets, shading presets, light directions, and recommended color maps
 ```
@@ -143,6 +173,21 @@ The Avalonia application has moved beyond a single-file viewer and now includes 
 
 ![K-PACS.neo Avalonia viewer workflow detail](Images/K-PACS%20Viewer%20with%203D%20ROI.png)
 
+### ✅ Completed: Plugin SDK & AI Segmentation Architecture
+
+K-PACS.neo now includes a four-tier **Plugin SDK** that supports AI segmentation, image processing, DICOM analysis, and DICOM communication extensions:
+
+- **KPACS.SDK** — zero-dependency contract library that plugin authors reference; defines `IPlugin`, capability interfaces (`ISegmentationProvider`, `IImageProcessor`, `IDicomAnalyzer`, `IDicomCommunicationHandler`), manifests, and shared DTOs
+- **KPACS.SDK.Grpc** — language-agnostic gRPC bridge for out-of-process plugins (Python, Go, Rust, etc.) via a `PluginService` proto
+- **PluginManager** — central registry that discovers `plugin.json` manifests, manages plugin lifecycles (start/stop/fault), and provides convenience methods like `GetSegmentationProviderAsync`
+- **ProcessPluginHost** — spawns child processes for out-of-process plugins, scans stdout for `KPACS_PLUGIN_PORT=<port>`, and manages the gRPC channel lifecycle
+- **GrpcPluginAdapter** — bridges `IPlugin` / `ISegmentationProvider` / `IImageProcessor` / `IDicomAnalyzer` to the gRPC `PluginService` for cross-language interop
+- **InProcessPluginLoader** — loads .NET plugin assemblies via isolated, collectible `AssemblyLoadContext` instances with per-plugin dependency resolution
+- **Thin-client plugin proxy** — a `PluginProxyService` gRPC service on the render server lets thin clients invoke server-side plugins without local Python, GPU drivers, or plugin processes; `RemotePluginAdapter` on the viewer side forwards all calls transparently
+- **NiftiMaskConverter** — converts NIfTI-1 segmentation output (binary or multilabel, `.nii`/`.nii.gz`) into packed-bit `SegmentationMask3D` objects for overlay rendering, centerline planning, and measurement workflows
+- **Anatomy workspace integration** — the "AI Segmentation" panel in the anatomy workspace lets users pick a plugin and task, run segmentation with live progress, and import results directly into the study's segmentation mask dictionary
+- **Reference plugin** — TotalSegmentator Python sidecar plugin with `plugin.json` manifest, gRPC server, and TotalSegmentator bridge
+
 ### 🔲 Still To Do
 
 The following major components from the original K-PACS have **not yet been ported**:
@@ -170,6 +215,8 @@ The following major components from the original K-PACS have **not yet been port
 | **SQLite** | [Microsoft.Data.Sqlite 9.0.3](https://www.nuget.org/packages/Microsoft.Data.Sqlite/) |
 | **Cross-platform Viewer** | [Avalonia 11.3.7](https://avaloniaui.net/) (Windows, Linux, macOS) |
 | **Avalonia Theme** | [Semi.Avalonia 11.3.7.3](https://www.nuget.org/packages/Semi.Avalonia/) |
+| **gRPC** | [Grpc.Net.Client 2.71.0](https://www.nuget.org/packages/Grpc.Net.Client/) / [Grpc.AspNetCore 2.71.0](https://www.nuget.org/packages/Grpc.AspNetCore/) / [Google.Protobuf 3.30.2](https://www.nuget.org/packages/Google.Protobuf/) |
+| **Plugin SDK** | KPACS.SDK (zero-dependency contracts) + KPACS.SDK.Grpc (cross-language bridge) |
 | **Original** | Written in Delphi (Object Pascal), ~150k lines of application code |
 
 ## Building
@@ -178,11 +225,20 @@ The following major components from the original K-PACS have **not yet been port
 # Core library
 dotnet build KPACS.DCMClasses/KPACS.DCMClasses.csproj
 
-# Cross-platform Avalonia viewer
+# Plugin SDK (zero-dependency contracts)
+dotnet build KPACS.SDK/KPACS.SDK.csproj
+
+# Plugin SDK gRPC bridge
+dotnet build KPACS.SDK.Grpc/KPACS.SDK.Grpc.csproj
+
+# Cross-platform Avalonia viewer (includes plugin host)
 dotnet build KPACS.Viewer.Avalonia/KPACS.Viewer.Avalonia.csproj
 
-# Remote render server
+# Remote render server (includes plugin proxy)
 dotnet build KPACS.RenderServer/KPACS.RenderServer.csproj
+
+# Full solution
+dotnet build CSharp.sln
 ```
 
 ## Release Packaging
@@ -277,6 +333,21 @@ The Avalonia viewer can also connect to a `KPACS.RenderServer` instance and use 
 - **Remote render-server mode** — the browser can switch to the remote imagebox, and opened studies render through the server while preserving the normal K-PACS viewer workflow
 
 This remote mode is built into `KPACS.Viewer.Avalonia`; there is no separate thin-client application in the supported repository layout.
+
+### Plugin architecture
+
+K-PACS.neo supports extensible AI and analysis plugins through a four-capability SDK:
+
+- **Segmentation** — whole-body or region-specific structure segmentation (e.g. TotalSegmentator)
+- **ImageProcessing** — image enhancement, filtering, and transformation operations
+- **DicomAnalysis** — automated DICOM dataset analysis and quality checks
+- **DicomCommunication** — custom DICOM networking workflows
+
+Plugins are discovered from `plugin.json` manifests in the `Plugins/` directory next to the viewer or render server executable. They can run:
+
+- **Out-of-process** — Python, Go, Rust, or any language implementing the gRPC `PluginService` protocol. The host spawns the child process and connects via gRPC.
+- **In-process** — .NET assemblies loaded via isolated `AssemblyLoadContext` with per-plugin dependency resolution and collectible unloading.
+- **Remote** — in thin-client mode, the viewer queries the render server's `PluginProxyService` for server-side plugins and forwards all execution transparently. No local Python, GPU drivers, or plugin binaries are needed on the thin client.
 
 ### Network workflow notes
 

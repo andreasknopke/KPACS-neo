@@ -33,6 +33,8 @@
   <ItemGroup>
     <ProjectReference Include="..\KPACS.DCMClasses\KPACS.DCMClasses.csproj" />
     <ProjectReference Include="..\KPACS.RenderServer.Protos\KPACS.RenderServer.Protos.csproj" />
+    <ProjectReference Include="..\KPACS.SDK\KPACS.SDK.csproj" />
+    <ProjectReference Include="..\KPACS.SDK.Grpc\KPACS.SDK.Grpc.csproj" />
   </ItemGroup>
 
   <ItemGroup>

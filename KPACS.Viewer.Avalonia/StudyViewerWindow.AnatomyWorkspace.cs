@@ -60,6 +60,7 @@ public partial class StudyViewerWindow
             : "The selected 3D ROI stays a normal finding in reporting. Define or assign its anatomy here. Legacy learning only happens via explicit Learn actions.";
 
         AnatomyPanelContent.Children.Clear();
+        AnatomyPanelContent.Children.Add(BuildSegmentationSection());
         AnatomyPanelContent.Children.Add(BuildSelectedRoiAssignmentSection(selectedRoi));
         AnatomyPanelContent.Children.Add(BuildCatalogManagementSection());
         AnatomyPanelContent.Children.Add(BuildDeveloperWorkflowSection(selectedRoi));

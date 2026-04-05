@@ -6,6 +6,7 @@
 
 using KPACS.RenderServer.Services;
 using KPACS.Viewer.Models;
+using KPACS.Viewer.Plugins;
 using KPACS.Viewer.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -42,6 +43,16 @@ builder.Services.AddSingleton<VolumeManager>();
 builder.Services.AddSingleton<FrameEncoder>();
 builder.Services.AddSingleton<RenderOrchestrator>();
 
+// Plugin manager — discovers and manages server-side plugins.
+string pluginScratchRoot = Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+    "KPACS.RenderServer", "plugin-scratch");
+string pluginSearchPath = builder.Configuration["RenderServer:PluginDirectory"]
+    ?? Path.Combine(AppContext.BaseDirectory, "Plugins");
+var pluginManager = new PluginManager(pluginScratchRoot, dataDirectory: null, hostVersion: "0.7.0");
+int pluginsFound = pluginManager.DiscoverPlugins(pluginSearchPath);
+builder.Services.AddSingleton(pluginManager);
+
 // Background service that reaps idle sessions.
 builder.Services.AddHostedService<SessionReaperService>();
 
@@ -52,9 +63,11 @@ app.MapGrpcService<VolumeServiceImpl>();
 app.MapGrpcService<RenderServiceImpl>();
 app.MapGrpcService<InputServiceImpl>();
 app.MapGrpcService<StudyBrowserServiceImpl>();
+app.MapGrpcService<PluginProxyServiceImpl>();
 
 // Minimal health-check endpoint for load balancers / monitoring.
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
 
-app.Logger.LogInformation("K-PACS Render Server starting on {Urls}", string.Join(", ", app.Urls));
+app.Logger.LogInformation("K-PACS Render Server starting on {Urls} ({PluginsFound} plugins discovered)",
+    string.Join(", ", app.Urls), pluginsFound);
 app.Run();

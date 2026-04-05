@@ -1,0 +1,196 @@
+// ------------------------------------------------------------------------------------------------
+// K-PACS Render Server — Plugin Proxy service
+//
+// Exposes server-side plugins to thin clients over the existing render-server
+// gRPC channel.  Thin clients never need to spawn local plugin processes or
+// have Python / GPU drivers installed.
+// ------------------------------------------------------------------------------------------------
+
+syntax = "proto3";
+
+import "Protos/render_service.proto";
+
+option csharp_namespace = "KPACS.RenderServer.Protos";
+
+package kpacs.render;
+
+// ============================================================================
+// Plugin proxy service — thin-client → render-server → local plugin
+// ============================================================================
+
+service PluginProxyService {
+  /// List all plugins available on the render server.
+  rpc ListPlugins           (ListPluginsRequest)           returns (ListPluginsResponse);
+
+  /// Get detailed segmentation task catalogue for one plugin.
+  rpc GetSegmentationTasks  (ProxyGetSegTasksRequest)      returns (ProxyGetSegTasksResponse);
+
+  /// Run segmentation on a volume already loaded in a render session.
+  /// Returns a stream of progress / structure / completion events.
+  rpc RunSegmentation       (ProxySegmentationRequest)     returns (stream ProxySegmentationEvent);
+
+  /// Download a segmentation mask as packed bits (thin-client pull).
+  /// Used after RunSegmentation to transfer mask data for a single structure.
+  rpc GetMaskData           (GetMaskDataRequest)           returns (GetMaskDataResponse);
+}
+
+// ============================================================================
+// Plugin discovery
+// ============================================================================
+
+message ListPluginsRequest {}
+
+message ListPluginsResponse {
+  repeated PluginSummary plugins = 1;
+}
+
+message PluginSummary {
+  string id           = 1;
+  string name         = 2;
+  string version      = 3;
+  string author       = 4;
+  string description  = 5;
+  string license      = 6;
+  /// Bitmask of capabilities (matches KPACS.SDK.PluginCapability enum).
+  uint32 capabilities = 7;
+  /// Current lifecycle state on the server.
+  PluginProxyState state = 8;
+}
+
+enum PluginProxyState {
+  PLUGIN_PROXY_STATE_DISCOVERED = 0;
+  PLUGIN_PROXY_STATE_STARTING   = 1;
+  PLUGIN_PROXY_STATE_READY      = 2;
+  PLUGIN_PROXY_STATE_BUSY       = 3;
+  PLUGIN_PROXY_STATE_FAULTED    = 4;
+  PLUGIN_PROXY_STATE_STOPPED    = 5;
+}
+
+// ============================================================================
+// Segmentation task catalogue
+// ============================================================================
+
+message ProxyGetSegTasksRequest {
+  string plugin_id = 1;
+}
+
+message ProxyGetSegTasksResponse {
+  repeated ProxySegTaskInfo tasks = 1;
+}
+
+message ProxySegTaskInfo {
+  string id                       = 1;
+  string name                     = 2;
+  string description              = 3;
+  repeated string modalities      = 4;
+  int32  structure_count          = 5;
+  bool   requires_license         = 6;
+  repeated ProxyStructureEntry structures = 7;
+}
+
+message ProxyStructureEntry {
+  int32  label        = 1;
+  string id           = 2;
+  string display_name = 3;
+  string region       = 4;
+}
+
+// ============================================================================
+// Run segmentation
+// ============================================================================
+
+message ProxySegmentationRequest {
+  /// Session that owns the loaded volume.
+  string session_id    = 1;
+  /// Volume to segment (must be loaded in the session).
+  string volume_id     = 2;
+  /// Which plugin to use.
+  string plugin_id     = 3;
+  /// Segmentation task (e.g. "total", "lung_vessels").
+  string task_id       = 4;
+  /// Compute device preference: "gpu", "cpu", "gpu:0".
+  string device        = 5;
+  /// Whether to produce a combined multilabel volume on the server.
+  bool   produce_multilabel = 6;
+  /// Restrict output to these structure IDs. Empty = all.
+  repeated string roi_subset = 7;
+  /// Extra task-specific parameters.
+  map<string, string> parameters = 8;
+}
+
+/// Streaming event — mirrors the plugin SDK's SegmentationEvent
+/// but adds server-side mask transfer fields.
+message ProxySegmentationEvent {
+  oneof event {
+    ProxySegProgress    progress  = 1;
+    ProxySegStructure   structure = 2;
+    ProxySegComplete    complete  = 3;
+    ProxySegError       error     = 4;
+  }
+}
+
+message ProxySegProgress {
+  int32  step             = 1;
+  int32  total_steps      = 2;
+  int32  percent_complete = 3;
+  string status_message   = 4;
+}
+
+message ProxySegStructure {
+  int32  label          = 1;
+  string id             = 2;
+  string display_name   = 3;
+  string region         = 4;
+  double volume_mm3     = 5;
+  repeated int32 bounding_box_voxels = 6;
+  /// Server-generated mask token — pass to GetMaskData to download
+  /// the packed-bit mask for this structure.
+  string mask_token     = 7;
+}
+
+message ProxySegComplete {
+  double elapsed_seconds  = 1;
+  int32  structure_count  = 2;
+  /// Server-side multilabel token (if produce_multilabel was true).
+  string multilabel_token = 3;
+}
+
+message ProxySegError {
+  string message = 1;
+}
+
+// ============================================================================
+// Mask data transfer
+// ============================================================================
+
+message GetMaskDataRequest {
+  /// Token returned in ProxySegStructure.mask_token.
+  string mask_token = 1;
+  /// Desired encoding. Currently only "bit-packed" is supported.
+  string encoding   = 2;
+}
+
+message GetMaskDataResponse {
+  bool   success       = 1;
+  string error_message = 2;
+  /// Packed-bit mask data — same layout as SegmentationMaskStorage.
+  bytes  data          = 3;
+  /// Grid geometry of the mask.
+  ProxyVolumeGrid geometry = 4;
+  /// Number of foreground (set) voxels.
+  int32  foreground_count = 5;
+}
+
+message ProxyVolumeGrid {
+  int32  size_x    = 1;
+  int32  size_y    = 2;
+  int32  size_z    = 3;
+  double spacing_x = 4;
+  double spacing_y = 5;
+  double spacing_z = 6;
+  Vec3   origin    = 7;
+  Vec3   row_direction    = 8;
+  Vec3   column_direction = 9;
+  Vec3   normal           = 10;
+  string frame_of_reference_uid = 11;
+}

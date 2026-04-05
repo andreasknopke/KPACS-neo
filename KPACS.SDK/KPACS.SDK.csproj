@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Version>0.1.0</Version>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+    <RootNamespace>KPACS.SDK</RootNamespace>
+    <AssemblyName>KPACS.SDK</AssemblyName>
+    <Description>K-PACS Plugin SDK — contract interfaces and exchange models for external AI and image-processing plugins. Zero external dependencies.</Description>
+  </PropertyGroup>
+
+  <!-- Intentionally no PackageReference entries.
+       The SDK must stay dependency-free so that plugin authors
+       can reference it without pulling in fo-dicom, Avalonia, gRPC, etc. -->
+
+</Project>

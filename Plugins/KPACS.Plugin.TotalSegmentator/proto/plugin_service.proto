@@ -1,0 +1,219 @@
+// K-PACS Plugin Protocol — gRPC service definition
+// ──────────────────────────────────────────────────
+// COPY of KPACS.SDK.Grpc/Protos/plugin_service.proto
+// kept alongside the Python plugin for stub generation.
+//
+// Regenerate Python stubs with:
+//   python generate_proto.py
+
+syntax = "proto3";
+
+option csharp_namespace = "KPACS.SDK.Grpc";
+
+package kpacs.plugin;
+
+// ═══════════════════════════════════════════════════════════════════
+//  Service definition
+// ═══════════════════════════════════════════════════════════════════
+
+service PluginService {
+
+  // ── Lifecycle ──────────────────────────────────────────────────
+
+  rpc GetManifest        (GetManifestRequest)        returns (PluginManifestMsg);
+  rpc Initialize         (InitializeRequest)         returns (InitializeResponse);
+  rpc Shutdown           (ShutdownRequest)           returns (ShutdownResponse);
+
+  // ── Segmentation capability ───────────────────────────────────
+
+  rpc RunSegmentation    (SegmentationRequest)       returns (stream SegmentationEvent);
+  rpc GetSegmentationTasks (GetSegTasksRequest)      returns (GetSegTasksResponse);
+
+  // ── Image processing capability ───────────────────────────────
+
+  rpc ProcessImage       (ImageProcessRequest)       returns (ImageProcessResponse);
+  rpc GetImageOperations (GetImageOpsRequest)        returns (GetImageOpsResponse);
+
+  // ── DICOM analysis capability ─────────────────────────────────
+
+  rpc AnalyzeDicom       (DicomAnalysisRequest)      returns (DicomAnalysisResponse);
+  rpc GetDicomAnalyses   (GetDicomAnalysesRequest)   returns (GetDicomAnalysesResponse);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Lifecycle messages
+// ═══════════════════════════════════════════════════════════════════
+
+message GetManifestRequest {}
+
+message PluginManifestMsg {
+  string id           = 1;
+  string name         = 2;
+  string version      = 3;
+  string author       = 4;
+  string description  = 5;
+  string license      = 6;
+  uint32 capabilities = 7;
+}
+
+message InitializeRequest {
+  string scratch_directory = 1;
+  string data_directory    = 2;
+  string host_version      = 3;
+  map<string, string> extra = 4;
+}
+
+message InitializeResponse {
+  bool   ok            = 1;
+  string error_message = 2;
+}
+
+message ShutdownRequest  {}
+message ShutdownResponse {}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Segmentation messages
+// ═══════════════════════════════════════════════════════════════════
+
+message SegmentationRequest {
+  VolumeDescriptorMsg volume       = 1;
+  string              task_id      = 2;
+  string              output_directory = 3;
+  string              device       = 4;
+  repeated string     roi_subset   = 5;
+  bool                produce_multilabel = 6;
+  map<string, string> parameters   = 7;
+}
+
+message VolumeDescriptorMsg {
+  string          file_path           = 1;
+  string          format              = 2;
+  repeated int32  dimensions          = 3;
+  repeated double spacing_mm          = 4;
+  string          modality            = 5;
+  string          series_instance_uid = 6;
+}
+
+message SegmentationEvent {
+  oneof event {
+    SegProgressUpdate   progress  = 1;
+    SegStructureResult  structure = 2;
+    SegComplete         complete  = 3;
+    SegError            error     = 4;
+  }
+}
+
+message SegProgressUpdate {
+  int32  step            = 1;
+  int32  total_steps     = 2;
+  int32  percent_complete = 3;
+  string status_message  = 4;
+}
+
+message SegStructureResult {
+  int32  label          = 1;
+  string id             = 2;
+  string display_name   = 3;
+  string region         = 4;
+  string mask_path      = 5;
+  double volume_mm3     = 6;
+  repeated int32 bounding_box_voxels = 7;
+}
+
+message SegComplete {
+  string multilabel_path = 1;
+  double elapsed_seconds = 2;
+}
+
+message SegError {
+  string message = 1;
+}
+
+message GetSegTasksRequest {}
+
+message GetSegTasksResponse {
+  repeated SegTaskInfo tasks = 1;
+}
+
+message SegTaskInfo {
+  string id                   = 1;
+  string name                 = 2;
+  string description          = 3;
+  repeated string modalities  = 4;
+  int32  structure_count      = 5;
+  bool   requires_license     = 6;
+  repeated SegStructureEntry structures = 7;
+}
+
+message SegStructureEntry {
+  int32  label        = 1;
+  string id           = 2;
+  string display_name = 3;
+  string region       = 4;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Image processing messages
+// ═══════════════════════════════════════════════════════════════════
+
+message ImageProcessRequest {
+  VolumeDescriptorMsg input        = 1;
+  string              operation_id = 2;
+  string              output_path  = 3;
+  string              device       = 4;
+  map<string, string> parameters   = 5;
+}
+
+message ImageProcessResponse {
+  bool   success       = 1;
+  string error_message = 2;
+  string output_path   = 3;
+  map<string, string> metrics = 4;
+  double elapsed_seconds = 5;
+}
+
+message GetImageOpsRequest {}
+
+message GetImageOpsResponse {
+  repeated ImageOpInfo operations = 1;
+}
+
+message ImageOpInfo {
+  string id                       = 1;
+  string name                     = 2;
+  string description              = 3;
+  bool   supports_volumetric      = 4;
+  map<string, string> parameter_defaults = 5;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  DICOM analysis messages
+// ═══════════════════════════════════════════════════════════════════
+
+message DicomAnalysisRequest {
+  string              analysis_id     = 1;
+  map<string, string> tags            = 2;
+  string              pixel_data_path = 3;
+}
+
+message DicomAnalysisResponse {
+  bool   success        = 1;
+  string error_message  = 2;
+  map<string, string> findings = 3;
+  string classification = 4;
+  double confidence     = 5;
+  double elapsed_seconds = 6;
+}
+
+message GetDicomAnalysesRequest {}
+
+message GetDicomAnalysesResponse {
+  repeated DicomAnalysisInfo analyses = 1;
+}
+
+message DicomAnalysisInfo {
+  string id                  = 1;
+  string name                = 2;
+  string description         = 3;
+  bool   requires_pixel_data = 4;
+}
