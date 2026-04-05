@@ -27,4 +27,13 @@
     <ProjectReference Include="..\KPACS.Viewer.Avalonia\KPACS.Viewer.Avalonia.csproj" />
   </ItemGroup>
 
+  <!-- Copy plugin trees into the output so PluginManager discovers them at runtime -->
+  <ItemGroup>
+    <Content Include="..\Plugins\**\*">
+      <Link>Plugins\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>

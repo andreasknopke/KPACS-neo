@@ -49,4 +49,14 @@
     </Content>
   </ItemGroup>
 
+  <!-- Copy plugin directories into the output so they are discoverable at runtime.
+       Each immediate subdirectory of Plugins/ that contains a plugin.json is a plugin. -->
+  <ItemGroup>
+    <Content Include="..\Plugins\**\*">
+      <Link>Plugins\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
