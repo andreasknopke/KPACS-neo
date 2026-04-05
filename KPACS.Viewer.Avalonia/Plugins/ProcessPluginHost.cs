@@ -65,6 +65,12 @@ internal sealed class ProcessPluginHost : IAsyncDisposable
             }
         }
 
+        // Auto-generate gRPC stubs if generate_proto.py exists and *_pb2.py files are missing.
+        if (string.Equals(runtime.Type, "python", StringComparison.OrdinalIgnoreCase))
+        {
+            await GenerateProtoStubsIfNeededAsync(resolvedCommand, extraArgs, workingDir, ct);
+        }
+
         // Build argument list, replacing ${port} token with "0" (plugin picks a free port).
         List<string> args = [
             .. extraArgs,
@@ -253,6 +259,63 @@ internal sealed class ProcessPluginHost : IAsyncDisposable
         }
 
         Debug.WriteLine($"[ProcessPluginHost] pip install succeeded. {Truncate(stdout, 200)}");
+    }
+
+    /// <summary>
+    /// If the plugin directory contains <c>generate_proto.py</c> and no
+    /// <c>*_pb2.py</c> files exist, run the generator so that gRPC stubs
+    /// are available before the plugin process starts.
+    /// </summary>
+    private static async Task GenerateProtoStubsIfNeededAsync(
+        string pythonCommand, string[] pythonExtraArgs, string workingDir, CancellationToken ct)
+    {
+        string generatorScript = Path.Combine(workingDir, "generate_proto.py");
+        if (!File.Exists(generatorScript))
+        {
+            return;
+        }
+
+        // Check whether *_pb2.py files already exist.
+        bool stubsExist = Directory.EnumerateFiles(workingDir, "*_pb2.py").Any()
+                       || Directory.EnumerateFiles(workingDir, "*_pb2_grpc.py").Any();
+        if (stubsExist)
+        {
+            return;
+        }
+
+        Debug.WriteLine($"[ProcessPluginHost] Generating gRPC stubs via {generatorScript}");
+
+        List<string> args = [.. pythonExtraArgs, generatorScript];
+        var psi = new ProcessStartInfo
+        {
+            FileName = pythonCommand,
+            Arguments = string.Join(' ', args.Select(QuoteArg)),
+            WorkingDirectory = workingDir,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+
+        using var proc = Process.Start(psi)
+            ?? throw new InvalidOperationException("Failed to start proto generation process.");
+
+        Task<string> stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
+        Task<string> stderrTask = proc.StandardError.ReadToEndAsync(ct);
+
+        await proc.WaitForExitAsync(ct);
+        string stdout = await stdoutTask;
+        string stderr = await stderrTask;
+
+        if (proc.ExitCode != 0)
+        {
+            Debug.WriteLine($"[ProcessPluginHost] Proto generation failed (exit {proc.ExitCode}): {Truncate(stderr, 500)}");
+            throw new InvalidOperationException(
+                $"Failed to generate gRPC stubs for plugin (exit code {proc.ExitCode}). " +
+                $"{Truncate(stderr, 400)}");
+        }
+
+        Debug.WriteLine($"[ProcessPluginHost] Proto generation succeeded. {Truncate(stdout, 200)}");
     }
 
     // ── Python / command resolution ──────────────────────────────
