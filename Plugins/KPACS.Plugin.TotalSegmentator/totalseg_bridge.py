@@ -21,7 +21,7 @@ logger = logging.getLogger("kpacs.plugin.totalsegmentator.bridge")
 #  first use so the gRPC server boots fast.
 # ---------------------------------------------------------------------------
 _totalseg_api = None
-_class_map: dict[str, dict[str, int]] | None = None
+_class_map: dict[str, dict[int, str]] | None = None
 
 
 def _ensure_totalseg():
@@ -261,21 +261,24 @@ class TotalSegBridge:
         """
         _ensure_totalseg()
 
-        # Build label → name mapping from TotalSegmentator's class_map
+        # Build label → name and name → label mappings from TotalSegmentator's class_map.
+        # class_map format is: task_id → {label_int: structure_name_str}
         actual_task = task.replace("_fast", "").replace("_fastest", "")
-        task_map: dict[str, int] = {}
+        label_to_name: dict[int, str] = {}
+        name_to_label: dict[str, int] = {}
 
         if _class_map and actual_task in _class_map:
-            task_map = _class_map[actual_task]  # name → label
+            label_to_name = _class_map[actual_task]
+            name_to_label = {name: label for label, name in label_to_name.items()}
         else:
             logger.warning("No class_map entry for task '%s' — scanning output dir.", actual_task)
 
         structures: list[dict[str, Any]] = []
 
         if multilabel_path and Path(multilabel_path).exists():
-            structures = self._parse_multilabel(multilabel_path, task_map)
+            structures = self._parse_multilabel(multilabel_path, label_to_name)
         else:
-            structures = self._parse_individual_masks(output_dir, task_map)
+            structures = self._parse_individual_masks(output_dir, name_to_label)
 
         return structures
 
@@ -340,11 +343,11 @@ class TotalSegBridge:
             },
         }
 
-        for task_id, name_to_label in _class_map.items():
+        for task_id, label_to_name in _class_map.items():
             meta = task_meta.get(task_id, {})
             structure_entries: list[dict[str, Any]] = []
 
-            for struct_name, label_id in sorted(name_to_label.items(), key=lambda x: x[1]):
+            for label_id, struct_name in sorted(label_to_name.items()):
                 display_name, region = _get_metadata(struct_name)
                 structure_entries.append({
                     "label": label_id,
@@ -358,7 +361,7 @@ class TotalSegBridge:
                 "name": meta.get("name", task_id),
                 "description": meta.get("description", ""),
                 "modalities": meta.get("modalities", ["CT"]),
-                "structure_count": len(name_to_label),
+                "structure_count": len(label_to_name),
                 "requires_license": meta.get("requires_license", False),
                 "structures": structure_entries,
             })
@@ -370,7 +373,7 @@ class TotalSegBridge:
     @staticmethod
     def _parse_multilabel(
         multilabel_path: str,
-        task_map: dict[str, int],
+        label_to_name: dict[int, str],
     ) -> list[dict[str, Any]]:
         """Extract per-structure metrics from a single multilabel NIfTI."""
         import nibabel as nib
@@ -380,8 +383,6 @@ class TotalSegBridge:
         zooms = nii.header.get_zooms()
         voxel_vol = float(zooms[0]) * float(zooms[1]) * float(zooms[2])
 
-        # Invert map: label → name
-        label_to_name: dict[int, str] = {v: k for k, v in task_map.items()}
         present_labels = set(np.unique(data)) - {0}
 
         structures: list[dict[str, Any]] = []
@@ -411,7 +412,7 @@ class TotalSegBridge:
     @staticmethod
     def _parse_individual_masks(
         output_dir: str,
-        task_map: dict[str, int],
+        name_to_label: dict[str, int],
     ) -> list[dict[str, Any]]:
         """Parse per-structure NIfTI files from the output directory."""
         import nibabel as nib
@@ -424,7 +425,7 @@ class TotalSegBridge:
             if name in ("segmentations", "preview"):
                 continue  # skip multilabel & preview files
 
-            label_id = task_map.get(name, 0)
+            label_id = name_to_label.get(name, 0)
             display_name, region = _get_metadata(name)
 
             try:
