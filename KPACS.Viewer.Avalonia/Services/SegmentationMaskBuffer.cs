@@ -3,7 +3,7 @@ using KPACS.Viewer.Models;
 
 namespace KPACS.Viewer.Services;
 
-internal sealed class SegmentationMaskBuffer
+public sealed class SegmentationMaskBuffer
 {
     private readonly byte[] _bits;
 
@@ -137,6 +137,79 @@ internal sealed class SegmentationMaskBuffer
             CountForeground(),
             encoding,
             [.. _bits]);
+
+    /// <summary>
+    /// Extract a single axial (Z-plane) slice from the packed-bit mask.
+    /// Returns a flat boolean array of size SizeX × SizeY (x-fastest).
+    /// </summary>
+    public bool[] ExtractAxialSlice(int z)
+    {
+        if (z < 0 || z >= SizeZ)
+        {
+            return [];
+        }
+
+        int sliceSize = SizeX * SizeY;
+        bool[] slice = new bool[sliceSize];
+        int baseLinearIndex = z * sliceSize;
+
+        for (int i = 0; i < sliceSize; i++)
+        {
+            int linearIndex = baseLinearIndex + i;
+            int byteIndex = linearIndex >> 3;
+            byte bitMask = (byte)(1 << (linearIndex & 7));
+            slice[i] = (_bits[byteIndex] & bitMask) != 0;
+        }
+
+        return slice;
+    }
+
+    /// <summary>
+    /// Extract a single axial (Z-plane) slice and write foreground voxels
+    /// into a pre-allocated BGRA buffer with the specified overlay colour.
+    /// Only foreground voxels are written; background pixels are untouched.
+    /// </summary>
+    public void CompositeAxialSliceIntoBgra(
+        int z, byte[] bgra, int stride,
+        int imageWidth, int imageHeight,
+        byte overlayB, byte overlayG, byte overlayR, byte overlayA)
+    {
+        if (z < 0 || z >= SizeZ || bgra is null)
+        {
+            return;
+        }
+
+        int maskW = SizeX;
+        int maskH = SizeY;
+        int baseLinearIndex = z * maskW * maskH;
+
+        for (int my = 0; my < maskH && my < imageHeight; my++)
+        {
+            int rowBase = baseLinearIndex + (my * maskW);
+            int bgraRowBase = my * stride;
+
+            for (int mx = 0; mx < maskW && mx < imageWidth; mx++)
+            {
+                int linearIndex = rowBase + mx;
+                int byteIndex = linearIndex >> 3;
+                byte bitMask = (byte)(1 << (linearIndex & 7));
+
+                if ((_bits[byteIndex] & bitMask) == 0)
+                {
+                    continue;
+                }
+
+                int px = bgraRowBase + (mx * 4);
+                // Alpha blend: overlay on top of existing pixel.
+                double alpha = overlayA / 255.0;
+                double invAlpha = 1.0 - alpha;
+                bgra[px] = (byte)Math.Clamp(bgra[px] * invAlpha + overlayB * alpha, 0, 255);
+                bgra[px + 1] = (byte)Math.Clamp(bgra[px + 1] * invAlpha + overlayG * alpha, 0, 255);
+                bgra[px + 2] = (byte)Math.Clamp(bgra[px + 2] * invAlpha + overlayR * alpha, 0, 255);
+                bgra[px + 3] = 255;
+            }
+        }
+    }
 
     public static SegmentationMaskBuffer FromStorage(VolumeGridGeometry geometry, SegmentationMaskStorage storage)
     {

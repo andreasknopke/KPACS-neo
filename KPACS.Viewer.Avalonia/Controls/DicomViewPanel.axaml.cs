@@ -137,6 +137,28 @@ public partial class DicomViewPanel : UserControl
     private bool _planeTiltConstraintModeActive;
     private bool _planeTiltControlPressed;
 
+    // ── Segmentation mask overlay state ──────────────────────────
+    private List<SegmentationMaskOverlay> _segmentationMaskOverlays = [];
+
+    /// <summary>
+    /// Describes a single segmentation mask to overlay on the viewport.
+    /// </summary>
+    public sealed record SegmentationMaskOverlay(
+        SegmentationMask3D Mask,
+        Services.SegmentationMaskBuffer Buffer,
+        byte OverlayR, byte OverlayG, byte OverlayB, byte OverlayA);
+
+    /// <summary>
+    /// Sets the list of segmentation mask overlays to composite on each rendered slice.
+    /// Pass an empty list to hide all overlays.
+    /// </summary>
+    public void SetSegmentationMaskOverlays(IReadOnlyList<SegmentationMaskOverlay> overlays)
+    {
+        _segmentationMaskOverlays = overlays.ToList();
+        RenderImage(sharp: _isSharpRender);
+        InvalidateVisual();
+    }
+
     /// <summary>True when this panel is displaying a slice from a bound volume.</summary>
     public bool IsVolumeBound => _volume is not null;
 
@@ -1594,7 +1616,18 @@ public partial class DicomViewPanel : UserControl
 
             if (sourceRenderWidth == _imageWidth && sourceRenderHeight == _imageHeight)
             {
-                sourceBgra = _volumeSliceBgraPixels;
+                // Need a mutable copy if we're compositing overlays into native-size buffer.
+                if (_segmentationMaskOverlays.Count > 0)
+                {
+                    sourceBgra = HasViewTransform()
+                        ? EnsureViewTransformBuffer(sourceRequiredBytes)
+                        : EnsureRenderBuffer(sourceRequiredBytes);
+                    Buffer.BlockCopy(_volumeSliceBgraPixels, 0, sourceBgra, 0, sourceRequiredBytes);
+                }
+                else
+                {
+                    sourceBgra = _volumeSliceBgraPixels;
+                }
             }
             else
             {
@@ -1603,6 +1636,8 @@ public partial class DicomViewPanel : UserControl
                     : EnsureRenderBuffer(sourceRequiredBytes);
                 ResampleBgraBuffer(_volumeSliceBgraPixels, _imageWidth, _imageHeight, sourceBgra, sourceRenderWidth, sourceRenderHeight);
             }
+
+            ApplySegmentationMaskOverlays(sourceBgra, sourceRenderWidth, sourceRenderHeight);
 
             byte[] outputBgra = sourceBgra;
             int usedLength = sourceRequiredBytes;
@@ -1636,6 +1671,8 @@ public partial class DicomViewPanel : UserControl
                 sourceRenderWidth,
                 sourceRenderHeight,
                 sourceBgra);
+
+            ApplySegmentationMaskOverlays(sourceBgra, sourceRenderWidth, sourceRenderHeight);
 
             byte[] outputBgra = sourceBgra;
             int usedLength = sourceRequiredBytes;
@@ -1945,6 +1982,89 @@ public partial class DicomViewPanel : UserControl
                     outputBgra[outputIndex + 1] = (byte)Math.Clamp((outputBgra[outputIndex + 1] * baseWeight) + (overlayG * overlayWeight), 0, 255);
                     outputBgra[outputIndex + 2] = (byte)Math.Clamp((outputBgra[outputIndex + 2] * baseWeight) + (overlayR * overlayWeight), 0, 255);
                     outputBgra[outputIndex + 3] = 255;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Composites visible segmentation mask overlays onto the BGRA pixel buffer.
+    /// For axial slices, extracts the mask slice at the current Z index and alpha-blends
+    /// each foreground voxel with its assigned overlay colour.
+    /// </summary>
+    private void ApplySegmentationMaskOverlays(byte[] outputBgra, int outputWidth, int outputHeight)
+    {
+        if (_segmentationMaskOverlays.Count == 0 || _volume is null || outputWidth <= 0 || outputHeight <= 0)
+        {
+            return;
+        }
+
+        foreach (SegmentationMaskOverlay overlay in _segmentationMaskOverlays)
+        {
+            // Only composite axial slices for now — the mask is axis-aligned with the volume.
+            if (_volumeOrientation != SliceOrientation.Axial || HasTiltedPlane)
+            {
+                continue;
+            }
+
+            // The mask grid must match the volume grid dimensions.
+            VolumeGridGeometry g = overlay.Mask.Geometry;
+            if (g.SizeX != _volume.SizeX || g.SizeY != _volume.SizeY || g.SizeZ != _volume.SizeZ)
+            {
+                continue;
+            }
+
+            int z = _volumeSliceIndex;
+            if (z < 0 || z >= g.SizeZ)
+            {
+                continue;
+            }
+
+            // If the output is at image-native resolution, composite directly.
+            // Otherwise scale mask coordinates to the output buffer.
+            if (outputWidth == _imageWidth && outputHeight == _imageHeight)
+            {
+                overlay.Buffer.CompositeAxialSliceIntoBgra(
+                    z, outputBgra, outputWidth * 4,
+                    outputWidth, outputHeight,
+                    overlay.OverlayB, overlay.OverlayG, overlay.OverlayR, overlay.OverlayA);
+            }
+            else
+            {
+                // Scaled output: composite at mask resolution into a temp, then scale.
+                // For simplicity, iterate mask voxels and map to output coords.
+                int maskW = g.SizeX;
+                int maskH = g.SizeY;
+                int baseIndex = z * maskW * maskH;
+                byte[] bits = overlay.Mask.Storage.Data;
+                double scaleX = (double)outputWidth / maskW;
+                double scaleY = (double)outputHeight / maskH;
+                double alpha = overlay.OverlayA / 255.0;
+                double invAlpha = 1.0 - alpha;
+
+                for (int my = 0; my < maskH; my++)
+                {
+                    int rowBase = baseIndex + (my * maskW);
+                    int oy = Math.Clamp((int)(my * scaleY), 0, outputHeight - 1);
+
+                    for (int mx = 0; mx < maskW; mx++)
+                    {
+                        int linearIndex = rowBase + mx;
+                        int byteIndex = linearIndex >> 3;
+                        byte bitMask = (byte)(1 << (linearIndex & 7));
+
+                        if ((bits[byteIndex] & bitMask) == 0)
+                        {
+                            continue;
+                        }
+
+                        int ox = Math.Clamp((int)(mx * scaleX), 0, outputWidth - 1);
+                        int px = ((oy * outputWidth) + ox) * 4;
+                        outputBgra[px] = (byte)Math.Clamp(outputBgra[px] * invAlpha + overlay.OverlayB * alpha, 0, 255);
+                        outputBgra[px + 1] = (byte)Math.Clamp(outputBgra[px + 1] * invAlpha + overlay.OverlayG * alpha, 0, 255);
+                        outputBgra[px + 2] = (byte)Math.Clamp(outputBgra[px + 2] * invAlpha + overlay.OverlayR * alpha, 0, 255);
+                        outputBgra[px + 3] = 255;
+                    }
                 }
             }
         }

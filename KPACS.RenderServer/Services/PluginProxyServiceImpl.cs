@@ -410,8 +410,7 @@ public sealed class PluginProxyServiceImpl : PluginProxyService.PluginProxyServi
         bw.Write((float)orig.Z);
 
         bw.Write(new byte[16]);     // intent_name
-        bw.Write(new byte[4]);      // magic: "n+1\0"
-        bw.BaseStream.Seek(344, System.IO.SeekOrigin.Begin);
+        // magic: "n+1\0" — written directly (GZipStream does not support Seek).
         bw.Write((byte)'n'); bw.Write((byte)'+'); bw.Write((byte)'1'); bw.Write((byte)0);
 
         // 4-byte extension pad.

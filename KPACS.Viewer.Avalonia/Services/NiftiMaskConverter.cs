@@ -64,36 +64,92 @@ public static class NiftiMaskConverter
     {
         short[] voxelData = ReadNiftiInt16(multilabelPath);
         long totalVoxels = (long)volume.SizeX * volume.SizeY * volume.SizeZ;
-        var results = new List<SegmentationMask3D>(structures.Count);
+        long count = Math.Min(totalVoxels, voxelData.Length);
 
-        foreach (SegmentedStructure structure in structures)
+        // Build a label → index map for O(1) lookup.
+        var labelToIndex = new Dictionary<int, int>(structures.Count);
+        for (int s = 0; s < structures.Count; s++)
         {
-            int byteCount = (int)((totalVoxels + 7) / 8);
-            byte[] packed = new byte[byteCount];
-            int foreground = 0;
+            labelToIndex.TryAdd(structures[s].Label, s);
+        }
 
-            long count = Math.Min(totalVoxels, voxelData.Length);
-            for (long i = 0; i < count; i++)
+        // Pre-allocate packed-bit arrays and foreground counters for all structures.
+        int byteCount = (int)((totalVoxels + 7) / 8);
+        byte[][] allPacked = new byte[structures.Count][];
+        int[] foregrounds = new int[structures.Count];
+        for (int s = 0; s < structures.Count; s++)
+        {
+            allPacked[s] = new byte[byteCount];
+        }
+
+        // Pre-allocate bounding-box trackers for each structure.
+        int structureCount = structures.Count;
+        int[] bbMinX = new int[structureCount];
+        int[] bbMinY = new int[structureCount];
+        int[] bbMinZ = new int[structureCount];
+        int[] bbMaxX = new int[structureCount];
+        int[] bbMaxY = new int[structureCount];
+        int[] bbMaxZ = new int[structureCount];
+        Array.Fill(bbMinX, int.MaxValue);
+        Array.Fill(bbMinY, int.MaxValue);
+        Array.Fill(bbMinZ, int.MaxValue);
+        Array.Fill(bbMaxX, -1);
+        Array.Fill(bbMaxY, -1);
+        Array.Fill(bbMaxZ, -1);
+
+        int sizeX = volume.SizeX;
+        int sizeY = volume.SizeY;
+        int sizeZ = volume.SizeZ;
+
+        // Single pass over the voxel data — dispatch each voxel to its
+        // structure and track per-structure bounding boxes.
+        long i = 0;
+        for (int z = 0; z < sizeZ && i < count; z++)
+        {
+            for (int y = 0; y < sizeY && i < count; y++)
             {
-                if (voxelData[i] == structure.Label)
+                for (int x = 0; x < sizeX && i < count; x++, i++)
                 {
-                    packed[i >> 3] |= (byte)(1 << ((int)i & 7));
-                    foreground++;
+                    int label = voxelData[i];
+                    if (label != 0 && labelToIndex.TryGetValue(label, out int idx))
+                    {
+                        allPacked[idx][i >> 3] |= (byte)(1 << ((int)i & 7));
+                        foregrounds[idx]++;
+
+                        if (x < bbMinX[idx]) bbMinX[idx] = x;
+                        if (x > bbMaxX[idx]) bbMaxX[idx] = x;
+                        if (y < bbMinY[idx]) bbMinY[idx] = y;
+                        if (y > bbMaxY[idx]) bbMaxY[idx] = y;
+                        if (z < bbMinZ[idx]) bbMinZ[idx] = z;
+                        if (z > bbMaxZ[idx]) bbMaxZ[idx] = z;
+                    }
                 }
             }
+        }
 
-            if (foreground == 0)
+        double voxelVolMm3 = volume.SpacingX * volume.SpacingY * volume.SpacingZ;
+
+        var results = new List<SegmentationMask3D>(structures.Count);
+        for (int s = 0; s < structureCount; s++)
+        {
+            if (foregrounds[s] == 0)
             {
-                continue; // skip empty structures
+                continue;
             }
 
+            var stats = new SegmentationMaskStatistics(
+                foregrounds[s] * voxelVolMm3,
+                new VoxelIndex3D(bbMinX[s], bbMinY[s], bbMinZ[s]),
+                new VoxelIndex3D(bbMaxX[s], bbMaxY[s], bbMaxZ[s]));
+
             results.Add(BuildMask(
-                structure.DisplayName ?? structure.Id,
+                structures[s].DisplayName ?? structures[s].Id,
                 volume,
                 studyInstanceUid,
-                packed,
-                foreground,
-                $"Label {structure.Label}, Region: {structure.Region}"));
+                allPacked[s],
+                foregrounds[s],
+                $"Label {structures[s].Label}, Region: {structures[s].Region}",
+                stats));
         }
 
         return results;
@@ -122,7 +178,8 @@ public static class NiftiMaskConverter
         string studyInstanceUid,
         byte[] packedBits,
         int foregroundCount,
-        string? notes)
+        string? notes,
+        SegmentationMaskStatistics? precomputedStats = null)
     {
         var geometry = new VolumeGridGeometry(
             volume.SizeX, volume.SizeY, volume.SizeZ,
@@ -137,9 +194,13 @@ public static class NiftiMaskConverter
             "bit-packed",
             packedBits);
 
-        // Compute statistics.
-        var buffer = SegmentationMaskBuffer.FromStorage(geometry, storage);
-        SegmentationMaskStatistics? stats = buffer.ComputeStatistics();
+        // Use pre-computed statistics when available to avoid an additional full scan.
+        SegmentationMaskStatistics? stats = precomputedStats;
+        if (stats is null)
+        {
+            var buffer = SegmentationMaskBuffer.FromStorage(geometry, storage);
+            stats = buffer.ComputeStatistics();
+        }
 
         var metadata = new SegmentationMaskMetadata(
             SegmentationMaskSourceKind.Imported,

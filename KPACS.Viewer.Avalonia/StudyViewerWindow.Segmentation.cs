@@ -20,6 +20,7 @@ using Grpc.Net.Client;
 using KPACS.SDK;
 using KPACS.SDK.Contracts;
 using KPACS.SDK.Models;
+using KPACS.Viewer.Controls;
 using KPACS.Viewer.Models;
 using KPACS.Viewer.Plugins;
 using KPACS.Viewer.Rendering;
@@ -34,10 +35,36 @@ public partial class StudyViewerWindow
     private PluginManager? _pluginManager;
     private bool _pluginDiscoveryStarted;
     private bool _segmentationSectionExpanded = true;
+    private bool _segmentationResultsSectionExpanded = true;
     private string? _selectedSegmentationPluginId;
     private string? _selectedSegmentationTaskId;
     private bool _segmentationRunning;
     private CancellationTokenSource? _segmentationCancellation;
+    private readonly HashSet<Guid> _visibleSegmentationMaskIds = [];
+
+    /// <summary>
+    /// Predefined overlay colours for segmentation structures (ARGB hex).
+    /// Cycles through these for each imported mask.
+    /// </summary>
+    private static readonly (byte R, byte G, byte B)[] SegmentationOverlayPalette =
+    [
+        (255, 107,  89),  // Coral red
+        ( 66, 189, 255),  // Sky blue
+        ( 64, 224, 120),  // Mint green
+        (255, 193,  37),  // Gold
+        (178, 102, 255),  // Lavender
+        (255, 142, 200),  // Pink
+        (  0, 210, 211),  // Teal
+        (255, 165,  79),  // Tangerine
+        (144, 238, 144),  // Light green
+        (218, 112, 214),  // Orchid
+        (100, 149, 237),  // Cornflower
+        (255, 218, 185),  // Peach
+        ( 50, 205,  50),  // Lime
+        (135, 206, 250),  // Light sky blue
+        (255,  99,  71),  // Tomato
+        (147, 112, 219),  // Medium purple
+    ];
 
     /// <summary>
     /// Asynchronously register remote (render-server) plugins and refresh the
@@ -271,10 +298,163 @@ public partial class StudyViewerWindow
             statusText,
             CreateActionRow(runButton, cancelButton)));
 
+        // ── Imported structures list ────────────────────────────
+
+        if (_segmentationMasks.Count > 0)
+        {
+            (Border resultsSection, StackPanel resultsBody) = CreateAnatomySectionHost(
+                "Imported Structures",
+                $"{_segmentationMasks.Count} structure(s) available — toggle visibility to overlay on the viewport.",
+                _segmentationResultsSectionExpanded,
+                expanded => _segmentationResultsSectionExpanded = expanded);
+
+            // Show All / Hide All buttons.
+            var showAllButton = CreateAnatomyActionButton(
+                "Show all", "#FF1C5A3F", "#FF4FD08B", minWidth: 80, height: 26);
+            showAllButton.Click += (_, _) =>
+            {
+                foreach (SegmentationMask3D mask in _segmentationMasks.Values)
+                    _visibleSegmentationMaskIds.Add(mask.Id);
+
+                UpdateSegmentationOverlays();
+                RefreshAnatomyPanel();
+            };
+
+            var hideAllButton = CreateAnatomyActionButton(
+                "Hide all", "#FF5C2431", "#FFEB7D96", minWidth: 80, height: 26);
+            hideAllButton.Click += (_, _) =>
+            {
+                _visibleSegmentationMaskIds.Clear();
+                UpdateSegmentationOverlays();
+                RefreshAnatomyPanel();
+            };
+
+            resultsBody.Children.Add(CreateActionRow(showAllButton, hideAllButton));
+
+            // Individual structure rows with colour swatch + toggle.
+            int colorIndex = 0;
+            foreach (SegmentationMask3D mask in _segmentationMasks.Values.OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                (byte r, byte g, byte b) = SegmentationOverlayPalette[colorIndex % SegmentationOverlayPalette.Length];
+                bool isVisible = _visibleSegmentationMaskIds.Contains(mask.Id);
+
+                var colorSwatch = new Border
+                {
+                    Width = 14,
+                    Height = 14,
+                    CornerRadius = new CornerRadius(3),
+                    Background = new SolidColorBrush(Color.FromRgb(r, g, b)),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 0, 6, 0),
+                };
+
+                var nameText = new TextBlock
+                {
+                    Text = mask.Name,
+                    Foreground = new SolidColorBrush(Color.Parse(isVisible ? "#FFE0EAF4" : "#FF6B8DAA")),
+                    FontSize = 10.5,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    TextTrimming = Avalonia.Media.TextTrimming.CharacterEllipsis,
+                };
+
+                var toggleCheckBox = new CheckBox
+                {
+                    IsChecked = isVisible,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0),
+                    MinWidth = 0,
+                    Padding = new Thickness(0),
+                };
+
+                // Capture loop variables for the closure.
+                Guid maskId = mask.Id;
+                toggleCheckBox.IsCheckedChanged += (_, _) =>
+                {
+                    if (toggleCheckBox.IsChecked == true)
+                        _visibleSegmentationMaskIds.Add(maskId);
+                    else
+                        _visibleSegmentationMaskIds.Remove(maskId);
+
+                    UpdateSegmentationOverlays();
+
+                    // Update the name text dimming without a full panel rebuild.
+                    nameText.Foreground = new SolidColorBrush(
+                        Color.Parse(_visibleSegmentationMaskIds.Contains(maskId) ? "#FFE0EAF4" : "#FF6B8DAA"));
+                };
+
+                var row = new Grid
+                {
+                    ColumnDefinitions = new ColumnDefinitions("Auto,Auto,*"),
+                    ColumnSpacing = 4,
+                    Margin = new Thickness(0, 1),
+                };
+                Grid.SetColumn(colorSwatch, 0);
+                Grid.SetColumn(toggleCheckBox, 1);
+                Grid.SetColumn(nameText, 2);
+                row.Children.Add(colorSwatch);
+                row.Children.Add(toggleCheckBox);
+                row.Children.Add(nameText);
+
+                resultsBody.Children.Add(row);
+                colorIndex++;
+            }
+
+            body.Children.Add(resultsSection);
+        }
+
         return section;
     }
 
     // ── Segmentation execution ───────────────────────────────────
+
+    /// <summary>
+    /// Push the current set of visible segmentation masks as overlay layers
+    /// to every viewport panel whose volume matches a mask's geometry.
+    /// Called after visibility toggles, Show/Hide All, and segmentation import.
+    /// </summary>
+    private void UpdateSegmentationOverlays()
+    {
+        // Build the overlay list: one entry per visible mask, with a colour from the palette.
+        // The colour is assigned in the same deterministic order used by the structure list UI
+        // (sorted by Name, then palette index cycles).
+        List<(SegmentationMask3D Mask, byte R, byte G, byte B)> visibleMasks = [];
+        int colorIndex = 0;
+        foreach (SegmentationMask3D mask in _segmentationMasks.Values.OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            (byte r, byte g, byte b) = SegmentationOverlayPalette[colorIndex % SegmentationOverlayPalette.Length];
+            if (_visibleSegmentationMaskIds.Contains(mask.Id))
+            {
+                visibleMasks.Add((mask, r, g, b));
+            }
+            colorIndex++;
+        }
+
+        // Push overlays to every viewport slot that has a bound volume.
+        foreach (ViewportSlot slot in _slots)
+        {
+            SeriesVolume? volume = slot.Volume;
+            if (volume is null)
+            {
+                slot.Panel.SetSegmentationMaskOverlays([]);
+                continue;
+            }
+
+            // Filter to masks whose geometry matches the volume dimensions + spacing.
+            List<DicomViewPanel.SegmentationMaskOverlay> overlays = [];
+            foreach ((SegmentationMask3D mask, byte r, byte g, byte b) in visibleMasks)
+            {
+                if (mask.Geometry.SizeX == volume.SizeX &&
+                    mask.Geometry.SizeY == volume.SizeY &&
+                    mask.Geometry.SizeZ == volume.SizeZ)
+                {
+                    SegmentationMaskBuffer buffer = SegmentationMaskBuffer.FromStorage(mask.Geometry, mask.Storage);
+                    overlays.Add(new DicomViewPanel.SegmentationMaskOverlay(mask, buffer, r, g, b, 128));
+                }
+            }
+
+            slot.Panel.SetSegmentationMaskOverlays(overlays);
+        }
+    }
 
     private async Task RunSegmentationAsync(ProgressBar progressBar, TextBlock statusText)
     {
@@ -299,6 +479,8 @@ public partial class StudyViewerWindow
         CancellationToken ct = _segmentationCancellation.Token;
 
         RefreshAnatomyPanel();
+
+        string? tempNiftiPath = null;
 
         try
         {
@@ -332,11 +514,29 @@ public partial class StudyViewerWindow
                 "KPACS.Viewer.Avalonia", "seg-output", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(outputDir);
 
+            // For local plugins, export the in-memory volume to a temporary
+            // NIfTI file so that the out-of-process plugin can read it.
+            // Remote plugins already have access to the volume on the server.
+            string volumeFilePath = string.Empty;
+            bool isRemotePlugin = instance?.Handle is RemotePluginAdapter;
+
+            if (!isRemotePlugin)
+            {
+                await Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    statusText.Text = "Exporting volume for plugin…";
+                });
+
+                tempNiftiPath = Path.Combine(outputDir, "input.nii.gz");
+                await Task.Run(() => ExportVolumeAsNifti(volume, tempNiftiPath), ct);
+                volumeFilePath = tempNiftiPath;
+            }
+
             var request = new SegmentationRequest
             {
                 Volume = new VolumeDescriptor
                 {
-                    FilePath = string.Empty,  // will be overridden by the plugin host
+                    FilePath = volumeFilePath,
                     Format = "nifti",
                     Dimensions = [volume.SizeX, volume.SizeY, volume.SizeZ],
                     SpacingMm = [volume.SpacingX, volume.SpacingY, volume.SpacingZ],
@@ -396,12 +596,18 @@ public partial class StudyViewerWindow
             }
             else
             {
-                // Local mode: convert NIfTI results to masks.
+                // Local mode: convert NIfTI results to masks on a background
+                // thread so the UI stays responsive during heavy I/O + decode.
+                await Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    statusText.Text = "Importing segmentation masks…";
+                });
+
                 if (!string.IsNullOrEmpty(result.MultilabelPath) && File.Exists(result.MultilabelPath))
                 {
                     IReadOnlyList<SegmentationMask3D> masks =
-                        NiftiMaskConverter.FromMultilabelNiftiAll(
-                            result.MultilabelPath, result.Structures, volume, studyUid);
+                        await Task.Run(() => NiftiMaskConverter.FromMultilabelNiftiAll(
+                            result.MultilabelPath, result.Structures, volume, studyUid), ct);
 
                     foreach (SegmentationMask3D mask in masks)
                     {
@@ -412,19 +618,28 @@ public partial class StudyViewerWindow
                 else
                 {
                     // Individual per-structure NIfTI files.
-                    foreach (SegmentedStructure structure in result.Structures)
+                    var individualMasks = await Task.Run(() =>
                     {
-                        if (string.IsNullOrEmpty(structure.MaskPath) || !File.Exists(structure.MaskPath))
+                        var list = new List<SegmentationMask3D>();
+                        foreach (SegmentedStructure structure in result.Structures)
                         {
-                            continue;
+                            if (string.IsNullOrEmpty(structure.MaskPath) || !File.Exists(structure.MaskPath))
+                            {
+                                continue;
+                            }
+
+                            list.Add(NiftiMaskConverter.FromBinaryNifti(
+                                structure.MaskPath,
+                                structure.DisplayName ?? structure.Id,
+                                volume,
+                                studyUid));
                         }
 
-                        SegmentationMask3D mask = NiftiMaskConverter.FromBinaryNifti(
-                            structure.MaskPath,
-                            structure.DisplayName ?? structure.Id,
-                            volume,
-                            studyUid);
+                        return list;
+                    }, ct);
 
+                    foreach (SegmentationMask3D mask in individualMasks)
+                    {
                         _segmentationMasks[mask.Id] = mask;
                         imported++;
                     }
@@ -441,6 +656,12 @@ public partial class StudyViewerWindow
             ShowToast(
                 $"Segmentation complete — {imported} structures imported ({result.ElapsedSeconds:F1}s).",
                 ToastSeverity.Success);
+
+            // Auto-show all newly imported structures on the viewport.
+            foreach (SegmentationMask3D mask in _segmentationMasks.Values)
+                _visibleSegmentationMaskIds.Add(mask.Id);
+
+            UpdateSegmentationOverlays();
         }
         catch (OperationCanceledException)
         {
@@ -456,7 +677,123 @@ public partial class StudyViewerWindow
             _segmentationCancellation?.Dispose();
             _segmentationCancellation = null;
 
+            // Clean up the temporary NIfTI input file (best-effort).
+            if (tempNiftiPath is not null)
+            {
+                _ = Task.Run(() =>
+                {
+                    try { File.Delete(tempNiftiPath); }
+                    catch { /* best-effort */ }
+                });
+            }
+
             await Dispatcher.UIThread.InvokeAsync(() => RefreshAnatomyPanel());
+        }
+    }
+
+    /// <summary>
+    /// Write a <see cref="SeriesVolume"/> as a minimal NIfTI-1 .nii.gz file
+    /// so that out-of-process plugins receive a standard neuroimaging input format.
+    /// Ported from <c>PluginProxyServiceImpl.ExportVolumeAsNifti</c> in the render server.
+    /// </summary>
+    private static void ExportVolumeAsNifti(SeriesVolume volume, string outputPath)
+    {
+        using FileStream fs = File.Create(outputPath);
+        using var gz = new System.IO.Compression.GZipStream(fs, System.IO.Compression.CompressionLevel.Fastest);
+        using var bw = new BinaryWriter(gz);
+
+        int nx = volume.SizeX, ny = volume.SizeY, nz = volume.SizeZ;
+
+        // NIfTI-1 header (348 bytes).
+        bw.Write(348);              // sizeof_hdr
+        bw.Write(new byte[28]);     // data_type (10) + db_name (18)
+        bw.Write(0);                // extents
+        bw.Write((short)0);         // session_error
+        bw.Write((byte)'r');        // regular
+        bw.Write((byte)0);          // dim_info
+
+        // dim[0..7]
+        bw.Write((short)3);         // ndim
+        bw.Write((short)nx);
+        bw.Write((short)ny);
+        bw.Write((short)nz);
+        bw.Write((short)1); bw.Write((short)1); bw.Write((short)1); bw.Write((short)1);
+
+        bw.Write(0f); bw.Write(0f); bw.Write(0f); // intent_p1/2/3
+        bw.Write((short)0);         // intent_code
+        bw.Write((short)4);         // datatype = INT16
+        bw.Write((short)16);        // bitpix
+        bw.Write((short)0);         // slice_start
+
+        // pixdim[0..7]
+        bw.Write(1f);               // qfac
+        bw.Write((float)volume.SpacingX);
+        bw.Write((float)volume.SpacingY);
+        bw.Write((float)volume.SpacingZ);
+        bw.Write(0f); bw.Write(0f); bw.Write(0f); bw.Write(0f);
+
+        bw.Write(352f);             // vox_offset
+        bw.Write(1f);               // scl_slope
+        bw.Write(0f);               // scl_inter
+        bw.Write((short)0);         // slice_end
+        bw.Write((byte)0);          // slice_code
+        bw.Write((byte)2);          // xyzt_units = NIFTI_UNITS_MM
+
+        bw.Write(0f); bw.Write(0f); // cal_max, cal_min
+        bw.Write(0f); bw.Write(0f); // slice_duration, toffset
+        bw.Write(0); bw.Write(0);   // glmax, glmin
+        bw.Write(new byte[80]);     // descrip
+        bw.Write(new byte[24]);     // aux_file
+
+        // Use sform (method 2) to encode the full affine.
+        bw.Write((short)0);         // qform_code = 0 (unknown)
+        bw.Write((short)1);         // sform_code = 1 (scanner anat)
+
+        // quatern (unused since qform_code = 0)
+        bw.Write(0f); bw.Write(0f); bw.Write(0f);
+        bw.Write(0f); bw.Write(0f); bw.Write(0f);
+
+        // srow_x, srow_y, srow_z (4 floats each = 48 bytes)
+        Models.Vector3D row = volume.RowDirection;
+        Models.Vector3D col = volume.ColumnDirection;
+        Models.Vector3D nrm = volume.Normal;
+        Models.Vector3D orig = volume.Origin;
+
+        // srow_x
+        bw.Write((float)(row.X * volume.SpacingX));
+        bw.Write((float)(col.X * volume.SpacingY));
+        bw.Write((float)(nrm.X * volume.SpacingZ));
+        bw.Write((float)orig.X);
+        // srow_y
+        bw.Write((float)(row.Y * volume.SpacingX));
+        bw.Write((float)(col.Y * volume.SpacingY));
+        bw.Write((float)(nrm.Y * volume.SpacingZ));
+        bw.Write((float)orig.Y);
+        // srow_z
+        bw.Write((float)(row.Z * volume.SpacingX));
+        bw.Write((float)(col.Z * volume.SpacingY));
+        bw.Write((float)(nrm.Z * volume.SpacingZ));
+        bw.Write((float)orig.Z);
+
+        bw.Write(new byte[16]);     // intent_name
+        // magic: "n+1\0" — written directly (GZipStream does not support Seek).
+        bw.Write((byte)'n'); bw.Write((byte)'+'); bw.Write((byte)'1'); bw.Write((byte)0);
+
+        // 4-byte extension pad.
+        bw.Write(new byte[4]);
+
+        // Voxel data (INT16, x-fastest).
+        for (int z = 0; z < nz; z++)
+        {
+            int sliceBase = z * ny * nx;
+            for (int y = 0; y < ny; y++)
+            {
+                int rowBase = sliceBase + y * nx;
+                for (int x = 0; x < nx; x++)
+                {
+                    bw.Write(volume.Voxels[rowBase + x]);
+                }
+            }
         }
     }
 }

@@ -96,6 +96,19 @@ class TotalSegmentatorServicer(pb2_grpc.PluginServiceServicer):
         self._scratch_dir = request.scratch_directory
         self._data_dir = request.data_directory
         self._initialized = True
+
+        # Log GPU availability so we can diagnose device issues early.
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_name = torch.cuda.get_device_name(0)
+                vram_gb = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+                logger.info("PyTorch %s — CUDA device: %s (%.1f GB VRAM)", torch.__version__, gpu_name, vram_gb)
+            else:
+                logger.warning("PyTorch %s — NO CUDA available, inference will run on CPU!", torch.__version__)
+        except Exception:
+            pass
+
         logger.info(
             "Initialized — scratch=%s  data=%s  host=%s",
             self._scratch_dir,
@@ -230,9 +243,11 @@ class TotalSegmentatorServicer(pb2_grpc.PluginServiceServicer):
             )
 
         except Exception as exc:
+            import traceback as _tb
+            tb_text = _tb.format_exc()
             logger.exception("Segmentation failed for task '%s'", task_id)
             yield pb2.SegmentationEvent(
-                error=pb2.SegError(message=str(exc))
+                error=pb2.SegError(message=f"{exc}\n\n{tb_text}")
             )
 
     def GetSegmentationTasks(self, request, context):

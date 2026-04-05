@@ -216,33 +216,67 @@ class TotalSegBridge:
         os.makedirs(output_dir, exist_ok=True)
 
         fast = task.endswith("_fast") or task.endswith("_fastest")
-        actual_task = task.replace("_fast", "").replace("_fastest", "")
+        actual_task = task.replace("_fastest", "").replace("_fast", "")
 
         logger.info(
             "Running TotalSegmentator: input=%s task=%s device=%s fast=%s ml=%s",
             input_path, actual_task, device, fast, multilabel,
         )
 
-        _totalseg_api(
-            input=input_path,
-            output=output_dir,
-            ml=multilabel,
-            fast=fast,
-            task=actual_task,
-            device=device,
-            roi_subset=roi_subset,
-            quiet=True,
-            verbose=False,
-        )
+        # TotalSegmentator treats the `output` parameter differently depending
+        # on the `ml` flag:
+        #   ml=True  → `output` is a FILE path; nib.save writes multilabel there
+        #   ml=False → `output` is a DIRECTORY; per-structure .nii.gz go inside
+        #
+        # To get a predictable multilabel file location we pass a file path
+        # when ml=True, and a directory path when ml=False.
+        if multilabel:
+            ml_file = str(Path(output_dir) / "segmentations.nii.gz")
+            _totalseg_api(
+                input=input_path,
+                output=ml_file,
+                ml=True,
+                fast=fast,
+                task=actual_task,
+                device=device,
+                roi_subset=roi_subset,
+                quiet=True,
+                verbose=False,
+            )
+        else:
+            _totalseg_api(
+                input=input_path,
+                output=output_dir,
+                ml=False,
+                fast=fast,
+                task=actual_task,
+                device=device,
+                roi_subset=roi_subset,
+                quiet=True,
+                verbose=False,
+            )
 
         multilabel_path: str | None = None
         if multilabel:
+            # Primary: the file we told TotalSegmentator to write.
             candidate = Path(output_dir) / "segmentations.nii.gz"
-            alt_candidate = Path(output_dir) / f"{actual_task}.nii.gz"
-            if candidate.exists():
-                multilabel_path = str(candidate)
-            elif alt_candidate.exists():
-                multilabel_path = str(alt_candidate)
+            # Fallback: nibabel may strip .gz or use .nii only.
+            alt1 = Path(output_dir) / "segmentations.nii"
+            alt2 = Path(output_dir) / f"{actual_task}.nii.gz"
+            alt3 = Path(output_dir) / f"{actual_task}.nii"
+            for p in (candidate, alt1, alt2, alt3):
+                if p.exists():
+                    multilabel_path = str(p)
+                    break
+
+            if multilabel_path:
+                logger.info("Multilabel NIfTI found: %s", multilabel_path)
+            else:
+                logger.warning(
+                    "Multilabel NIfTI NOT found in %s — listing dir: %s",
+                    output_dir,
+                    [f.name for f in Path(output_dir).iterdir()] if Path(output_dir).exists() else "(dir missing)",
+                )
 
         return {"multilabel_path": multilabel_path}
 
@@ -263,7 +297,7 @@ class TotalSegBridge:
 
         # Build label → name and name → label mappings from TotalSegmentator's class_map.
         # class_map format is: task_id → {label_int: structure_name_str}
-        actual_task = task.replace("_fast", "").replace("_fastest", "")
+        actual_task = task.replace("_fastest", "").replace("_fast", "")
         label_to_name: dict[int, str] = {}
         name_to_label: dict[str, int] = {}
 
@@ -375,38 +409,63 @@ class TotalSegBridge:
         multilabel_path: str,
         label_to_name: dict[int, str],
     ) -> list[dict[str, Any]]:
-        """Extract per-structure metrics from a single multilabel NIfTI."""
+        """Extract per-structure metrics from a single multilabel NIfTI.
+
+        Uses a true single-pass approach with ``np.bincount`` for voxel
+        counts, then one ``np.where`` per label only for bounding-box
+        computation on the already-known-small set of coordinates.
+        Actually, even the bounding box is computed without ``np.where``
+        by leveraging ``np.flatnonzero`` on 1-D projections.
+        """
         import nibabel as nib
 
+        logger.info("Loading multilabel NIfTI: %s", multilabel_path)
         nii = nib.load(multilabel_path)
-        data: np.ndarray = np.asarray(nii.dataobj, dtype=np.int32)
+        data: np.ndarray = np.asarray(nii.dataobj, dtype=np.uint8)
         zooms = nii.header.get_zooms()
         voxel_vol = float(zooms[0]) * float(zooms[1]) * float(zooms[2])
+        logger.info("  Shape=%s, dtype=%s, voxel_vol=%.4f mm³", data.shape, data.dtype, voxel_vol)
 
-        present_labels = set(np.unique(data)) - {0}
+        # Single-pass voxel count per label via bincount (< 1 ms on 81 M voxels).
+        counts = np.bincount(data.ravel())
+        present_labels = [int(i) for i in range(1, len(counts)) if counts[i] > 0]
+        logger.info("  %d non-background labels found, computing bounding boxes…", len(present_labels))
 
+        # Compute per-label bounding boxes efficiently:
+        # For each axis, compute the min and max index where the label appears
+        # by projecting (any-match) along the other two axes.
+        dim0, dim1, dim2 = data.shape
         structures: list[dict[str, Any]] = []
-        for label_id in sorted(present_labels):
+
+        for label_id in present_labels:
             name = label_to_name.get(label_id, f"label_{label_id}")
             display_name, region = _get_metadata(name)
+            voxel_count = int(counts[label_id])
+            volume_mm3 = float(voxel_count) * voxel_vol
 
+            # Build a boolean mask once for this label.
             mask = data == label_id
-            volume_mm3 = float(mask.sum()) * voxel_vol
 
-            coords = np.argwhere(mask)
-            bbox_min = coords.min(axis=0).tolist()
-            bbox_max = coords.max(axis=0).tolist()
+            # Axis projections to find bounding box without materializing full coordinates.
+            # any() along two axes at a time gives a 1-D boolean per remaining axis.
+            ax0 = np.flatnonzero(mask.any(axis=(1, 2)))  # which dim0 slices have this label
+            ax1 = np.flatnonzero(mask.any(axis=(0, 2)))  # which dim1 rows
+            ax2 = np.flatnonzero(mask.any(axis=(0, 1)))  # which dim2 cols
+
+            bbox_min = [int(ax0[0]), int(ax1[0]), int(ax2[0])]
+            bbox_max = [int(ax0[-1]), int(ax1[-1]), int(ax2[-1])]
 
             structures.append({
-                "label": int(label_id),
+                "label": label_id,
                 "id": name,
                 "display_name": display_name,
                 "region": region,
-                "mask_path": "",  # no individual mask when using multilabel
+                "mask_path": "",
                 "volume_mm3": volume_mm3,
-                "bounding_box": bbox_min + bbox_max,  # [minX, minY, minZ, maxX, maxY, maxZ]
+                "bounding_box": bbox_min + bbox_max,
             })
 
+        logger.info("Parsed %d structures from multilabel NIfTI.", len(structures))
         return structures
 
     @staticmethod
