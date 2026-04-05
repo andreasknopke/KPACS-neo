@@ -388,22 +388,26 @@ public sealed class PluginProxyServiceImpl : PluginProxyService.PluginProxyServi
         bw.Write(0f); bw.Write(0f); bw.Write(0f);
 
         // srow_x, srow_y, srow_z (4 floats each = 48 bytes)
+        //
+        // DICOM uses LPS (Left-Posterior-Superior) patient coordinates;
+        // NIfTI expects RAS (Right-Anterior-Superior).  Convert by
+        // negating the X and Y rows of the affine matrix.
         SpatialVector3D row = volume.RowDirection;
         SpatialVector3D col = volume.ColumnDirection;
         SpatialVector3D nrm = volume.Normal;
         SpatialVector3D orig = volume.Origin;
 
-        // srow_x
-        bw.Write((float)(row.X * volume.SpacingX));
-        bw.Write((float)(col.X * volume.SpacingY));
-        bw.Write((float)(nrm.X * volume.SpacingZ));
-        bw.Write((float)orig.X);
-        // srow_y
-        bw.Write((float)(row.Y * volume.SpacingX));
-        bw.Write((float)(col.Y * volume.SpacingY));
-        bw.Write((float)(nrm.Y * volume.SpacingZ));
-        bw.Write((float)orig.Y);
-        // srow_z
+        // srow_x  (RAS X = −LPS X)
+        bw.Write((float)(-row.X * volume.SpacingX));
+        bw.Write((float)(-col.X * volume.SpacingY));
+        bw.Write((float)(-nrm.X * volume.SpacingZ));
+        bw.Write((float)(-orig.X));
+        // srow_y  (RAS Y = −LPS Y)
+        bw.Write((float)(-row.Y * volume.SpacingX));
+        bw.Write((float)(-col.Y * volume.SpacingY));
+        bw.Write((float)(-nrm.Y * volume.SpacingZ));
+        bw.Write((float)(-orig.Y));
+        // srow_z  (RAS Z = LPS Z — unchanged)
         bw.Write((float)(row.Z * volume.SpacingX));
         bw.Write((float)(col.Z * volume.SpacingY));
         bw.Write((float)(nrm.Z * volume.SpacingZ));
