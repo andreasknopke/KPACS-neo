@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 using KPACS.SDK;
 
@@ -50,14 +51,19 @@ internal sealed class ProcessPluginHost : IAsyncDisposable
         string workingDir = Path.GetFullPath(
             Path.Combine(_pluginDirectory, runtime.WorkingDirectory));
 
+        // Resolve the command (handles "python" → actual interpreter on this OS).
+        (string resolvedCommand, string[] extraArgs) = ResolveCommand(runtime.Type, runtime.Command);
+
         // Build argument list, replacing ${port} token with "0" (plugin picks a free port).
-        List<string> args = runtime.Args
-            .Select(a => a.Replace("${port}", "0", StringComparison.OrdinalIgnoreCase))
-            .ToList();
+        List<string> args = [
+            .. extraArgs,
+            .. runtime.Args
+                .Select(a => a.Replace("${port}", "0", StringComparison.OrdinalIgnoreCase)),
+        ];
 
         var psi = new ProcessStartInfo
         {
-            FileName = runtime.Command,
+            FileName = resolvedCommand,
             Arguments = string.Join(' ', args.Select(QuoteArg)),
             WorkingDirectory = workingDir,
             UseShellExecute = false,
@@ -75,7 +81,23 @@ internal sealed class ProcessPluginHost : IAsyncDisposable
         }
 
         _process = new Process { StartInfo = psi };
-        _process.Start();
+
+        try
+        {
+            _process.Start();
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            string hint = string.Equals(runtime.Type, "python", StringComparison.OrdinalIgnoreCase)
+                ? $"The plugin '{_manifest.Id}' requires Python 3 but no working Python interpreter " +
+                  $"was found on this system (tried: {resolvedCommand}). " +
+                  "Please install Python 3.10+ from https://www.python.org/downloads/ and ensure " +
+                  "it is on your PATH, then restart the viewer."
+                : $"Could not start plugin '{_manifest.Id}': the command '{resolvedCommand}' was not found. " +
+                  $"Ensure the required runtime is installed and on your PATH.";
+
+            throw new InvalidOperationException(hint, ex);
+        }
 
         // Read stdout lines until we get the port announcement or the process dies.
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -172,5 +194,146 @@ internal sealed class ProcessPluginHost : IAsyncDisposable
     private static string Truncate(string value, int maxLength)
     {
         return value.Length <= maxLength ? value : value[..maxLength] + "…";
+    }
+
+    // ── Python / command resolution ──────────────────────────────
+
+    /// <summary>
+    /// Resolve the runtime command to an actual executable path.
+    /// For <c>"python"</c> runtimes this probes multiple well-known candidates
+    /// so we work on systems where only <c>py</c>, <c>python3</c>, or a Store
+    /// stub is installed.
+    /// </summary>
+    /// <returns>
+    /// A tuple of (executable, extraArgs). <c>extraArgs</c> is non-empty when
+    /// the launcher needs a version flag (e.g. <c>py -3</c>).
+    /// </returns>
+    private static (string Command, string[] ExtraArgs) ResolveCommand(string runtimeType, string declaredCommand)
+    {
+        if (string.Equals(runtimeType, "python", StringComparison.OrdinalIgnoreCase))
+        {
+            return ResolvePythonCommand(declaredCommand);
+        }
+
+        // Other runtime types: use the command as-is.
+        return (declaredCommand, []);
+    }
+
+    /// <summary>
+    /// Find a working Python 3 interpreter on this machine.
+    /// Tries PATH-based commands first, then well-known installation directories
+    /// (conda, miniconda, pyenv, standard python.org locations).
+    /// Each candidate is tested with <c>--version</c> to confirm it is actually usable.
+    /// </summary>
+    private static (string Command, string[] ExtraArgs) ResolvePythonCommand(string declaredCommand)
+    {
+        // Phase 1: PATH-based commands.
+        List<(string cmd, string[] extra)> candidates = [(declaredCommand, [])];
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            candidates.Add(("python3", []));
+            candidates.Add(("py", ["-3"]));
+        }
+        else
+        {
+            candidates.Add(("python3", []));
+        }
+
+        foreach ((string cmd, string[] extra) in candidates)
+        {
+            if (ProbePython(cmd, extra))
+            {
+                Debug.WriteLine($"[ProcessPluginHost] Resolved Python via PATH: {cmd} {string.Join(' ', extra)}");
+                return (cmd, extra);
+            }
+        }
+
+        // Phase 2: Well-known installation directories.
+        List<string> probePaths = [];
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+
+            // Conda / Miniconda / Anaconda — user-level installs
+            probePaths.Add(Path.Combine(home, "miniconda3", "python.exe"));
+            probePaths.Add(Path.Combine(home, "anaconda3", "python.exe"));
+            probePaths.Add(Path.Combine(home, "Miniconda3", "python.exe"));
+            probePaths.Add(Path.Combine(home, "Anaconda3", "python.exe"));
+
+            // Conda / Miniconda — common system-wide locations
+            probePaths.Add(@"C:\Miniconda3\python.exe");
+            probePaths.Add(@"C:\Anaconda3\python.exe");
+            probePaths.Add(@"C:\ProgramData\miniconda3\python.exe");
+            probePaths.Add(@"C:\ProgramData\anaconda3\python.exe");
+
+            // pyenv-win
+            probePaths.Add(Path.Combine(home, ".pyenv", "pyenv-win", "shims", "python.exe"));
+
+            // Standard python.org installs (Python 3.10–3.14)
+            for (int minor = 14; minor >= 10; minor--)
+            {
+                probePaths.Add(Path.Combine(localAppData, "Programs", "Python", $"Python3{minor}", "python.exe"));
+                probePaths.Add($@"C:\Python3{minor}\python.exe");
+            }
+        }
+        else
+        {
+            // Linux / macOS
+            probePaths.Add(Path.Combine(home, "miniconda3", "bin", "python3"));
+            probePaths.Add(Path.Combine(home, "anaconda3", "bin", "python3"));
+            probePaths.Add(Path.Combine(home, ".pyenv", "shims", "python3"));
+            probePaths.Add("/usr/local/bin/python3");
+            probePaths.Add("/opt/homebrew/bin/python3");
+        }
+
+        foreach (string path in probePaths)
+        {
+            if (File.Exists(path) && ProbePython(path, []))
+            {
+                Debug.WriteLine($"[ProcessPluginHost] Resolved Python at known path: {path}");
+                return (path, []);
+            }
+        }
+
+        // None found — return the declared command so the caller gets a clear
+        // "file not found" error that includes the expected name.
+        Debug.WriteLine(
+            "[ProcessPluginHost] No working Python interpreter found. " +
+            $"Tried {candidates.Count} PATH commands and {probePaths.Count} known paths.");
+
+        return (declaredCommand, []);
+    }
+
+    /// <summary>
+    /// Quick probe: can we run <c>&lt;cmd&gt; [extra] --version</c> successfully?
+    /// </summary>
+    private static bool ProbePython(string command, string[] extraArgs)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = command,
+                Arguments = string.Join(' ', [.. extraArgs, "--version"]),
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+
+            using var proc = Process.Start(psi);
+            if (proc is null) return false;
+
+            proc.WaitForExit(5_000);
+            return proc.ExitCode == 0;
+        }
+        catch
+        {
+            // File not found, access denied, etc.
+            return false;
+        }
     }
 }
