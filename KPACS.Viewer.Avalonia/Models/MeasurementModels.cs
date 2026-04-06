@@ -298,7 +298,6 @@ public sealed record StudyMeasurement(
             return false;
         }
 
-        const int sampleCount = 40;
         double currentPlanePosition = metadata.Origin.Dot(metadata.Normal);
 
         var componentIndex = GetSortedContourComponentIndex();
@@ -310,62 +309,92 @@ public sealed record StudyMeasurement(
         List<Point[]> interpolated = [];
         foreach ((int componentId, double[] planePositions, VolumeRoiContour[] contours) in componentIndex)
         {
-            if (contours.Length < 2)
+            try
             {
-                continue;
+                if (contours.Length < 2)
+                {
+                    continue;
+                }
+
+                // Binary search for the bracketing pair instead of linear scan.
+                int searchResult = Array.BinarySearch(planePositions, currentPlanePosition);
+                if (searchResult >= 0)
+                {
+                    // Exact match — the direct-projection path should have handled this.
+                    continue;
+                }
+
+                int insertionPoint = ~searchResult;
+                if (insertionPoint <= 0 || insertionPoint >= contours.Length)
+                {
+                    continue;
+                }
+
+                int lowerIndex = insertionPoint - 1;
+                VolumeRoiContour lowerContour = contours[lowerIndex];
+                VolumeRoiContour upperContour = contours[lowerIndex + 1];
+                double lowerPlane = lowerContour.PlanePosition;
+                double upperPlane = upperContour.PlanePosition;
+                double thickness = upperPlane - lowerPlane;
+                if (Math.Abs(thickness) <= double.Epsilon)
+                {
+                    continue;
+                }
+
+                double t = (currentPlanePosition - lowerPlane) / thickness;
+                int sampleCount = Math.Clamp(
+                    Math.Min(lowerContour.Anchors.Length, upperContour.Anchors.Length),
+                    12,
+                    20);
+
+                Vector3D[] interpolatedPts;
+                if (!VolumeRoiInterpolationHelper.TryInterpolateContour(
+                        CreateInterpolationInput(lowerContour),
+                        CreateInterpolationInput(upperContour),
+                        t,
+                        sampleCount,
+                        out interpolatedPts) ||
+                    interpolatedPts.Length < 3)
+                {
+                    Vector3D[] lowerPoints = ResampleClosedContour(lowerContour, sampleCount);
+                    Vector3D[] upperPoints = ResampleClosedContour(upperContour, sampleCount);
+                    if (lowerPoints.Length < 3 || upperPoints.Length < 3)
+                    {
+                        continue;
+                    }
+
+                    if (lowerPoints.Length == upperPoints.Length)
+                    {
+                        upperPoints = AlignContourPoints(lowerPoints, upperPoints);
+                    }
+
+                    interpolatedPts = InterpolateContourPoints(lowerPoints, upperPoints, t);
+                }
+
+                Point[] projected = new Point[interpolatedPts.Length];
+                bool hasInvalidProjection = false;
+                for (int i = 0; i < interpolatedPts.Length; i++)
+                {
+                    Point projectedPoint = metadata.PixelPointFromPatient(interpolatedPts[i]);
+                    if (double.IsNaN(projectedPoint.X) || double.IsNaN(projectedPoint.Y) || double.IsInfinity(projectedPoint.X) || double.IsInfinity(projectedPoint.Y))
+                    {
+                        hasInvalidProjection = true;
+                        break;
+                    }
+
+                    projected[i] = projectedPoint;
+                }
+
+                if (!hasInvalidProjection && projected.Length >= 3)
+                {
+                    interpolated.Add(projected);
+                }
             }
-
-            // Binary search for the bracketing pair instead of linear scan.
-            int searchResult = Array.BinarySearch(planePositions, currentPlanePosition);
-            if (searchResult >= 0)
+            catch (Exception exception)
             {
-                // Exact match — the direct-projection path should have handled this.
-                continue;
-            }
-
-            int insertionPoint = ~searchResult;
-            if (insertionPoint <= 0 || insertionPoint >= contours.Length)
-            {
-                continue;
-            }
-
-            int lowerIndex = insertionPoint - 1;
-            VolumeRoiContour lowerContour = contours[lowerIndex];
-            VolumeRoiContour upperContour = contours[lowerIndex + 1];
-            double lowerPlane = lowerContour.PlanePosition;
-            double upperPlane = upperContour.PlanePosition;
-            double thickness = upperPlane - lowerPlane;
-            if (Math.Abs(thickness) <= double.Epsilon)
-            {
-                continue;
-            }
-
-            double t = (currentPlanePosition - lowerPlane) / thickness;
-
-            // Fast linear interpolation: resample + align + lerp.
-            // Avoids the expensive SDF grid computation (up to 192×192 cells × P vertices).
-            Vector3D[] lowerPoints = ResampleClosedContour(lowerContour, sampleCount);
-            Vector3D[] upperPoints = ResampleClosedContour(upperContour, sampleCount);
-            if (lowerPoints.Length < 3 || upperPoints.Length < 3)
-            {
-                continue;
-            }
-
-            if (lowerPoints.Length == upperPoints.Length)
-            {
-                upperPoints = AlignContourPoints(lowerPoints, upperPoints);
-            }
-
-            Vector3D[] interpolatedPts = InterpolateContourPoints(lowerPoints, upperPoints, t);
-            Point[] projected = new Point[interpolatedPts.Length];
-            for (int i = 0; i < interpolatedPts.Length; i++)
-            {
-                projected[i] = metadata.PixelPointFromPatient(interpolatedPts[i]);
-            }
-
-            if (projected.Length >= 3)
-            {
-                interpolated.Add(projected);
+                App.LogRuntimeDiagnostic(
+                    "VOLUME-ROI",
+                    $"Interpolation failed for measurement {Id:D} component {componentId}: {exception.GetType().Name} {exception.Message}");
             }
         }
 

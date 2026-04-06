@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Threading;
 using Avalonia;
 using Avalonia.Threading;
 using KPACS.Viewer.Models;
@@ -10,8 +11,10 @@ public partial class StudyViewerWindow
 {
     private const int MeasurementSessionSaveDebounceMs = 700;
     private const int MeasurementSessionFormatVersion = 4;
+    private const int MaxPersistedSegmentationMaskBytes = 1_048_576;
 
     private readonly DispatcherTimer _measurementSessionSaveDebounceTimer = new();
+    private readonly SemaphoreSlim _measurementSessionSaveSemaphore = new(1, 1);
     private readonly ISegmentationMaskPersistenceService _segmentationMaskPersistenceService = new SegmentationMaskPersistenceService();
     private string _loadedMeasurementSessionStudyInstanceUid = string.Empty;
     private bool _isApplyingMeasurementSession;
@@ -19,7 +22,7 @@ public partial class StudyViewerWindow
 
     private static readonly JsonSerializerOptions s_measurementSessionSerializerOptions = new()
     {
-        WriteIndented = true,
+        WriteIndented = false,
     };
 
     private void EnsureMeasurementSessionPersistenceInitialized()
@@ -36,7 +39,14 @@ public partial class StudyViewerWindow
     private async void OnMeasurementSessionSaveDebounceTimerTick(object? sender, EventArgs e)
     {
         _measurementSessionSaveDebounceTimer.Stop();
-        await FlushMeasurementSessionSaveAsync();
+        try
+        {
+            await FlushMeasurementSessionSaveAsync();
+        }
+        catch (Exception exception)
+        {
+            App.LogRuntimeException("MEASUREMENT-SESSION", exception, unhandled: false);
+        }
     }
 
     private void ScheduleMeasurementSessionSave()
@@ -119,8 +129,8 @@ public partial class StudyViewerWindow
         MeasurementSessionEnvelope? envelope;
         try
         {
-            string json = await File.ReadAllTextAsync(sessionPath);
-            envelope = JsonSerializer.Deserialize<MeasurementSessionEnvelope>(json, s_measurementSessionSerializerOptions);
+            await using FileStream stream = File.OpenRead(sessionPath);
+            envelope = await JsonSerializer.DeserializeAsync<MeasurementSessionEnvelope>(stream, s_measurementSessionSerializerOptions);
         }
         catch
         {
@@ -144,9 +154,44 @@ public partial class StudyViewerWindow
             return;
         }
 
-        MeasurementSessionEnvelope envelope = BuildMeasurementSessionEnvelope(study);
-        string json = JsonSerializer.Serialize(envelope, s_measurementSessionSerializerOptions);
-        await File.WriteAllTextAsync(sessionPath, json).ConfigureAwait(false);
+        await _measurementSessionSaveSemaphore.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            MeasurementSessionEnvelope envelope = BuildMeasurementSessionEnvelope(study);
+            string tempPath = $"{sessionPath}.{Guid.NewGuid():N}.tmp";
+            try
+            {
+                await using FileStream stream = new(tempPath, FileMode.Create, FileAccess.Write, FileShare.None);
+                await JsonSerializer.SerializeAsync(stream, envelope, s_measurementSessionSerializerOptions).ConfigureAwait(false);
+                await stream.FlushAsync().ConfigureAwait(false);
+
+                if (File.Exists(sessionPath))
+                {
+                    File.Replace(tempPath, sessionPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
+                }
+                else
+                {
+                    File.Move(tempPath, sessionPath);
+                }
+            }
+            finally
+            {
+                if (File.Exists(tempPath))
+                {
+                    try
+                    {
+                        File.Delete(tempPath);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+        }
+        finally
+        {
+            _measurementSessionSaveSemaphore.Release();
+        }
     }
 
     private void ApplyMeasurementSessionEnvelope(MeasurementSessionEnvelope envelope)
@@ -225,8 +270,20 @@ public partial class StudyViewerWindow
 
     private MeasurementSessionEnvelope BuildMeasurementSessionEnvelope(StudyDetails study)
     {
-        List<StoredSegmentationMask3D> masks = _segmentationMasks.Values
+        Dictionary<Guid, SegmentationMask3D> persistedMasks = _segmentationMasks.Values
+            .Where(ShouldPersistSegmentationMaskInSession)
+            .ToDictionary(mask => mask.Id);
+
+        List<StoredSegmentationMask3D> masks = persistedMasks.Values
             .Select(_segmentationMaskPersistenceService.ToStored)
+            .ToList();
+
+        HashSet<Guid> persistedMaskIds = [.. persistedMasks.Keys];
+        List<StudyMeasurement> measurements = _studyMeasurements
+            .Select(measurement =>
+                measurement.SegmentationMaskId is Guid maskId && !persistedMaskIds.Contains(maskId)
+                    ? measurement.WithSegmentationMask(null)
+                    : measurement)
             .ToList();
 
         return new MeasurementSessionEnvelope
@@ -234,7 +291,7 @@ public partial class StudyViewerWindow
             Version = MeasurementSessionFormatVersion,
             SavedUtc = DateTimeOffset.UtcNow,
             StudyInstanceUid = study.Study.StudyInstanceUid,
-            Measurements = [.. _studyMeasurements],
+            Measurements = measurements,
             SegmentationMasks = masks,
             SelectedMeasurementId = _selectedMeasurementId,
             SelectedCenterlineSeedSetId = _selectedCenterlineSeedSetId,
@@ -244,6 +301,20 @@ public partial class StudyViewerWindow
             VascularValidationSnapshot = _vascularValidationSnapshot.EnsureDefaults(),
             WorkspaceState = BuildMeasurementSessionWorkspaceState(),
         };
+    }
+
+    private static bool ShouldPersistSegmentationMaskInSession(SegmentationMask3D mask)
+    {
+        ArgumentNullException.ThrowIfNull(mask);
+
+        bool isImported = mask.Metadata.SourceKind == SegmentationMaskSourceKind.Imported;
+        bool hasLinkedMeasurement = Guid.TryParse(mask.Metadata.SourceMeasurementId, out _);
+        if (isImported && (hasLinkedMeasurement || mask.Storage.Data.Length > MaxPersistedSegmentationMaskBytes))
+        {
+            return false;
+        }
+
+        return mask.Storage.Data.Length <= MaxPersistedSegmentationMaskBytes || !isImported;
     }
 
     private MeasurementSessionWorkspaceState BuildMeasurementSessionWorkspaceState()

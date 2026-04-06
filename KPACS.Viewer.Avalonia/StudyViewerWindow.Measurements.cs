@@ -31,6 +31,7 @@ public partial class StudyViewerWindow
         panel.SetMeasurementTool(GetEffectiveMeasurementTool());
         panel.NavigationTool = _navigationTool;
         panel.SetMeasurementNudgeMode(false);
+        panel.SetMeasurementVisibilityProvider(IsMeasurementVisible);
         panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
         panel.SetCenterlineOverlays(GetCenterlineOverlaysForSlot(slot));
         panel.SetSegmentationMaskResolver(ResolveSegmentationMask);
@@ -56,6 +57,7 @@ public partial class StudyViewerWindow
         slot.Panel.SetMeasurementTool(GetEffectiveMeasurementTool());
         slot.Panel.NavigationTool = _navigationTool;
         slot.Panel.SetMeasurementNudgeMode(false);
+        slot.Panel.SetMeasurementVisibilityProvider(IsMeasurementVisible);
         slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
         slot.Panel.SetCenterlineOverlays(GetCenterlineOverlaysForSlot(slot));
         slot.Panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
@@ -77,6 +79,7 @@ public partial class StudyViewerWindow
             slot.Panel.SetMeasurementTool(effectiveTool);
             slot.Panel.NavigationTool = _navigationTool;
             slot.Panel.SetMeasurementNudgeMode(false);
+            slot.Panel.SetMeasurementVisibilityProvider(IsMeasurementVisible);
             slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
             slot.Panel.SetCenterlineOverlays(GetCenterlineOverlaysForSlot(slot));
             slot.Panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
@@ -90,6 +93,18 @@ public partial class StudyViewerWindow
             RefreshAnatomyPanel();
         }
         UpdateStatus();
+    }
+
+    private bool IsMeasurementVisible(StudyMeasurement measurement)
+    {
+        if (measurement.Kind == MeasurementKind.VolumeRoi &&
+            measurement.SegmentationMaskId is Guid segmentationMaskId &&
+            _segmentationMasks.ContainsKey(segmentationMaskId))
+        {
+            return _visibleSegmentationMaskIds.Contains(segmentationMaskId);
+        }
+
+        return true;
     }
 
     private IEnumerable<DicomViewPanel.CenterlineOverlay> GetCenterlineOverlaysForSlot(ViewportSlot slot)

@@ -302,9 +302,14 @@ public partial class StudyViewerWindow
 
         if (_segmentationMasks.Count > 0)
         {
+            int roiBackedCount = _segmentationMasks.Values.Count(mask => HasLinkedVolumeRoi(mask));
+            string resultsHint = roiBackedCount > 0
+                ? $"{_segmentationMasks.Count} structure(s) available — ROI-backed structures render as 3D ROI outlines across all MPR views."
+                : $"{_segmentationMasks.Count} structure(s) available — toggle visibility to overlay on the viewport.";
+
             (Border resultsSection, StackPanel resultsBody) = CreateAnatomySectionHost(
                 "Imported Structures",
-                $"{_segmentationMasks.Count} structure(s) available — toggle visibility to overlay on the viewport.",
+                resultsHint,
                 _segmentationResultsSectionExpanded,
                 expanded => _segmentationResultsSectionExpanded = expanded);
 
@@ -316,7 +321,9 @@ public partial class StudyViewerWindow
                 foreach (SegmentationMask3D mask in _segmentationMasks.Values)
                     _visibleSegmentationMaskIds.Add(mask.Id);
 
+                EnsureSegmentationVolumeRois(_segmentationMasks.Values);
                 UpdateSegmentationOverlays();
+                RefreshMeasurementPanels();
                 RefreshAnatomyPanel();
             };
 
@@ -326,6 +333,7 @@ public partial class StudyViewerWindow
             {
                 _visibleSegmentationMaskIds.Clear();
                 UpdateSegmentationOverlays();
+                RefreshMeasurementPanels();
                 RefreshAnatomyPanel();
             };
 
@@ -371,11 +379,17 @@ public partial class StudyViewerWindow
                 toggleCheckBox.IsCheckedChanged += (_, _) =>
                 {
                     if (toggleCheckBox.IsChecked == true)
+                    {
                         _visibleSegmentationMaskIds.Add(maskId);
+                        EnsureSegmentationVolumeRoi(maskId);
+                    }
                     else
+                    {
                         _visibleSegmentationMaskIds.Remove(maskId);
+                    }
 
                     UpdateSegmentationOverlays();
+                    RefreshMeasurementPanels();
 
                     // Update the name text dimming without a full panel rebuild.
                     nameText.Foreground = new SolidColorBrush(
@@ -422,7 +436,7 @@ public partial class StudyViewerWindow
         foreach (SegmentationMask3D mask in _segmentationMasks.Values.OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
         {
             (byte r, byte g, byte b) = SegmentationOverlayPalette[colorIndex % SegmentationOverlayPalette.Length];
-            if (_visibleSegmentationMaskIds.Contains(mask.Id))
+            if (_visibleSegmentationMaskIds.Contains(mask.Id) && !HasLinkedVolumeRoi(mask))
             {
                 visibleMasks.Add((mask, r, g, b));
             }
@@ -569,6 +583,7 @@ public partial class StudyViewerWindow
 
             // Import results as SegmentationMask3D objects.
             int imported = 0;
+            List<SegmentationMask3D> importedMasks = [];
 
             if (instance?.Handle is RemotePluginAdapter remoteAdapterForMasks)
             {
@@ -589,7 +604,7 @@ public partial class StudyViewerWindow
 
                     if (mask is not null)
                     {
-                        _segmentationMasks[mask.Id] = mask;
+                        importedMasks.Add(mask);
                         imported++;
                     }
                 }
@@ -611,7 +626,7 @@ public partial class StudyViewerWindow
 
                     foreach (SegmentationMask3D mask in masks)
                     {
-                        _segmentationMasks[mask.Id] = mask;
+                        importedMasks.Add(mask);
                         imported++;
                     }
                 }
@@ -640,7 +655,7 @@ public partial class StudyViewerWindow
 
                     foreach (SegmentationMask3D mask in individualMasks)
                     {
-                        _segmentationMasks[mask.Id] = mask;
+                        importedMasks.Add(mask);
                         imported++;
                     }
                 }
@@ -657,11 +672,13 @@ public partial class StudyViewerWindow
                 $"Segmentation complete — {imported} structures imported ({result.ElapsedSeconds:F1}s).",
                 ToastSeverity.Success);
 
-            // Auto-show all newly imported structures on the viewport.
-            foreach (SegmentationMask3D mask in _segmentationMasks.Values)
-                _visibleSegmentationMaskIds.Add(mask.Id);
+            RegisterImportedSegmentationMasks(importedMasks);
+
+            ApplyDefaultSegmentationVisibility(importedMasks);
+            EnsureSegmentationVolumeRois(importedMasks.Where(mask => _visibleSegmentationMaskIds.Contains(mask.Id)), volume);
 
             UpdateSegmentationOverlays();
+            RefreshMeasurementPanels();
         }
         catch (OperationCanceledException)
         {
@@ -689,6 +706,144 @@ public partial class StudyViewerWindow
 
             await Dispatcher.UIThread.InvokeAsync(() => RefreshAnatomyPanel());
         }
+    }
+
+    private void RegisterImportedSegmentationMasks(IEnumerable<SegmentationMask3D> importedMasks)
+    {
+        foreach (SegmentationMask3D importedMask in importedMasks)
+        {
+            _segmentationMasks[importedMask.Id] = importedMask;
+        }
+    }
+
+    private bool TryCreateSegmentationVolumeRoi(
+        SegmentationMask3D mask,
+        SeriesVolume volume,
+        out StudyMeasurement? measurement,
+        out SegmentationMask3D? linkedMask)
+    {
+        measurement = null;
+        linkedMask = null;
+
+        if (!SegmentationMaskVolumeRoiConverter.TryCreateVolumeContours(mask, volume, out VolumeRoiContour[] contours) || contours.Length == 0)
+        {
+            return false;
+        }
+
+        int representativeSliceIndex = GetRepresentativeAxialSliceIndex(mask, volume);
+        DicomSpatialMetadata metadata = VolumeReslicer.GetSliceSpatialMetadata(volume, SliceOrientation.Axial, representativeSliceIndex);
+        measurement = StudyMeasurement.CreateVolumeRoi(metadata.FilePath, metadata, contours, mask.Id);
+        linkedMask = mask with
+        {
+            Metadata = mask.Metadata with
+            {
+                SourceMeasurementId = measurement.Id.ToString("D"),
+            }
+        };
+        return true;
+    }
+
+    private bool HasLinkedVolumeRoi(SegmentationMask3D mask)
+    {
+        if (!Guid.TryParse(mask.Metadata.SourceMeasurementId, out Guid measurementId))
+        {
+            return false;
+        }
+
+        return _studyMeasurements.Any(measurement => measurement.Id == measurementId && measurement.Kind == MeasurementKind.VolumeRoi);
+    }
+
+    private void EnsureSegmentationVolumeRois(IEnumerable<SegmentationMask3D> masks, SeriesVolume? preferredVolume = null)
+    {
+        bool addedMeasurement = false;
+        foreach (SegmentationMask3D mask in masks)
+        {
+            addedMeasurement |= EnsureSegmentationVolumeRoi(mask.Id, preferredVolume);
+        }
+
+        if (addedMeasurement)
+        {
+            ScheduleMeasurementSessionSave();
+        }
+    }
+
+    private bool EnsureSegmentationVolumeRoi(Guid maskId, SeriesVolume? preferredVolume = null)
+    {
+        if (!_segmentationMasks.TryGetValue(maskId, out SegmentationMask3D? mask))
+        {
+            return false;
+        }
+
+        if (HasLinkedVolumeRoi(mask))
+        {
+            return false;
+        }
+
+        SeriesVolume? resolvedVolume = preferredVolume;
+        if (resolvedVolume is null && !TryResolveSegmentationMaskVolume(mask, out resolvedVolume))
+        {
+            return false;
+        }
+
+        if (resolvedVolume is null ||
+            !TryCreateSegmentationVolumeRoi(mask, resolvedVolume, out StudyMeasurement? measurement, out SegmentationMask3D? linkedMask) ||
+            measurement is null ||
+            linkedMask is null)
+        {
+            return false;
+        }
+
+        _segmentationMasks[maskId] = linkedMask;
+        _studyMeasurements.RemoveAll(existing => existing.Id == measurement.Id);
+        _studyMeasurements.Add(measurement);
+        return true;
+    }
+
+    private bool TryResolveSegmentationMaskVolume(SegmentationMask3D mask, out SeriesVolume? volume)
+    {
+        volume = _activeSlot?.Volume;
+        if (volume is not null && IsMaskCompatibleWithVolume(mask, volume))
+        {
+            return true;
+        }
+
+        volume = _slots
+            .Select(slot => slot.Volume)
+            .FirstOrDefault(candidate => candidate is not null && IsMaskCompatibleWithVolume(mask, candidate));
+        return volume is not null;
+    }
+
+    private static bool IsMaskCompatibleWithVolume(SegmentationMask3D mask, SeriesVolume volume)
+    {
+        return mask.Geometry.SizeX == volume.SizeX
+            && mask.Geometry.SizeY == volume.SizeY
+            && mask.Geometry.SizeZ == volume.SizeZ
+            && string.Equals(mask.SourceFrameOfReferenceUid, volume.FrameOfReferenceUid, StringComparison.Ordinal);
+    }
+
+    private static int GetRepresentativeAxialSliceIndex(SegmentationMask3D mask, SeriesVolume volume)
+    {
+        int sliceIndex = mask.Metadata.Statistics?.BoundsMin.Z ?? 0;
+        return Math.Clamp(sliceIndex, 0, Math.Max(0, volume.SizeZ - 1));
+    }
+
+    private void ApplyDefaultSegmentationVisibility(IEnumerable<SegmentationMask3D> importedMasks)
+    {
+        SegmentationMask3D[] imported = importedMasks.ToArray();
+        if (imported.Length == 0)
+        {
+            return;
+        }
+
+        foreach (SegmentationMask3D mask in imported)
+        {
+            _visibleSegmentationMaskIds.Remove(mask.Id);
+        }
+
+        SegmentationMask3D defaultVisibleMask = imported
+            .OrderBy(mask => mask.Name, StringComparer.OrdinalIgnoreCase)
+            .First();
+        _visibleSegmentationMaskIds.Add(defaultVisibleMask.Id);
     }
 
     /// <summary>

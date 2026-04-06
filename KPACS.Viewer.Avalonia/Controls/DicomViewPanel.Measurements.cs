@@ -12,6 +12,7 @@ using Avalonia.Platform;
 using Avalonia.Threading;
 using KPACS.Viewer.Models;
 using KPACS.Viewer.Rendering;
+using KPACS.Viewer.Services;
 using SpatialVector3D = KPACS.Viewer.Models.Vector3D;
 
 namespace KPACS.Viewer.Controls;
@@ -48,6 +49,7 @@ public partial class DicomViewPanel
     private MeasurementDraft? _measurementDraft;
     private MeasurementEditSession? _measurementEditSession;
     private Func<StudyMeasurement, Point[], string?>? _measurementTextSupplementProvider;
+    private Func<StudyMeasurement, bool>? _measurementVisibilityProvider;
     private Func<Guid, SegmentationMask3D?>? _segmentationMaskResolver;
     private readonly Stack<RoiHistoryEntry> _roiUndoHistory = [];
     private readonly Stack<RoiHistoryEntry> _roiRedoHistory = [];
@@ -77,6 +79,12 @@ public partial class DicomViewPanel
     public void SetMeasurementTextSupplementProvider(Func<StudyMeasurement, Point[], string?>? provider)
     {
         _measurementTextSupplementProvider = provider;
+        UpdateMeasurementPresentation();
+    }
+
+    public void SetMeasurementVisibilityProvider(Func<StudyMeasurement, bool>? provider)
+    {
+        _measurementVisibilityProvider = provider;
         UpdateMeasurementPresentation();
     }
 
@@ -1305,42 +1313,85 @@ public partial class DicomViewPanel
         return Color.FromArgb(0xE8, paletteR[paletteIndex], paletteG[paletteIndex], paletteB[paletteIndex]);
     }
 
+    private bool TryCreateLinkedSegmentationSliceContours(StudyMeasurement measurement, out Point[][] contours)
+    {
+        contours = [];
+        if (measurement.SegmentationMaskId is not Guid segmentationMaskId ||
+            _volume is null ||
+            HasTiltedPlane ||
+            _volumeOrientation == SliceOrientation.Axial)
+        {
+            return false;
+        }
+
+        if (!TryResolveSegmentationMask(segmentationMaskId, out SegmentationMask3D segmentationMask))
+        {
+            return false;
+        }
+
+        return SegmentationMaskVolumeRoiConverter.TryCreateSliceContours(
+            segmentationMask,
+            _volume,
+            _volumeOrientation,
+            _volumeSliceIndex,
+            out contours);
+    }
+
     private List<RenderedMeasurement> GetRenderedMeasurements()
     {
         List<RenderedMeasurement> renderedMeasurements = [];
 
         foreach (StudyMeasurement measurement in _measurements)
         {
-            Point[] imagePoints;
-            bool isInterpolatedVolumeSlice = false;
-            Point[][]? volumeContourProjections = null;
-            if (measurement.Kind == MeasurementKind.VolumeRoi)
+            try
             {
-                if (SpatialMetadata is null ||
-                    !measurement.TryProjectVolumeContoursTo(SpatialMetadata, out Point[][] projectedContours, out isInterpolatedVolumeSlice) ||
-                    projectedContours.Length == 0)
+                if (_measurementVisibilityProvider is not null && !_measurementVisibilityProvider(measurement))
                 {
                     continue;
                 }
 
-                imagePoints = projectedContours[0];
-                volumeContourProjections = projectedContours;
-            }
-            else if (!measurement.TryProjectTo(SpatialMetadata, out imagePoints))
-            {
-                continue;
-            }
+                Point[] imagePoints;
+                bool isInterpolatedVolumeSlice = false;
+                Point[][]? volumeContourProjections = null;
+                if (measurement.Kind == MeasurementKind.VolumeRoi)
+                {
+                    Point[][] projectedContours;
+                    if (TryCreateLinkedSegmentationSliceContours(measurement, out Point[][] segmentationContours))
+                    {
+                        projectedContours = segmentationContours;
+                    }
+                    else if (SpatialMetadata is null ||
+                        !measurement.TryProjectVolumeContoursTo(SpatialMetadata, out projectedContours, out isInterpolatedVolumeSlice) ||
+                        projectedContours.Length == 0)
+                    {
+                        continue;
+                    }
 
-            Point[] controlPoints = imagePoints.Select(ImageToControlPoint).ToArray();
-            bool isSelected = measurement.Id == _selectedMeasurementId;
-            renderedMeasurements.Add(new RenderedMeasurement(
-                measurement,
-                imagePoints,
-                controlPoints,
-                CreateMeasurementLabel(measurement, imagePoints, controlPoints, isSelected),
-                isSelected,
-                isInterpolatedVolumeSlice,
-                volumeContourProjections));
+                    imagePoints = projectedContours[0];
+                    volumeContourProjections = projectedContours;
+                }
+                else if (!measurement.TryProjectTo(SpatialMetadata, out imagePoints))
+                {
+                    continue;
+                }
+
+                Point[] controlPoints = imagePoints.Select(ImageToControlPoint).ToArray();
+                bool isSelected = measurement.Id == _selectedMeasurementId;
+                renderedMeasurements.Add(new RenderedMeasurement(
+                    measurement,
+                    imagePoints,
+                    controlPoints,
+                    CreateMeasurementLabel(measurement, imagePoints, controlPoints, isSelected),
+                    isSelected,
+                    isInterpolatedVolumeSlice,
+                    volumeContourProjections));
+            }
+            catch (Exception exception)
+            {
+                KPACS.Viewer.App.LogRuntimeDiagnostic(
+                    "MEASUREMENT-RENDER",
+                    $"Skipped measurement {measurement.Id:D} ({measurement.Kind}) while rendering: {exception.GetType().Name} {exception.Message}");
+            }
         }
 
         return renderedMeasurements;
