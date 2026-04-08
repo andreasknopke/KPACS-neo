@@ -207,7 +207,9 @@ public partial class StudyViewerWindow
         }
 
         List<string> taskDisplayNames = tasks.Count > 0
-            ? tasks.Select(t => $"{t.Name} ({t.StructureCount} structures)").ToList()
+            ? tasks.Select(t => t.RequiresLicense
+                ? $"{t.Name} ({t.StructureCount} structures, license required)"
+                : $"{t.Name} ({t.StructureCount} structures)").ToList()
             : ["(no tasks defined)"];
         List<string> taskIds = tasks.Count > 0
             ? tasks.Select(t => t.Id).ToList()

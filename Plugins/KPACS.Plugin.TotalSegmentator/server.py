@@ -242,6 +242,13 @@ class TotalSegmentatorServicer(pb2_grpc.PluginServiceServicer):
                 len(structures),
             )
 
+        except SystemExit as exc:
+            logger.exception("Segmentation aborted by TotalSegmentator for task '%s'", task_id)
+            detail = str(exc).strip() or "TotalSegmentator aborted the segmentation request."
+            yield pb2.SegmentationEvent(
+                error=pb2.SegError(message=detail)
+            )
+
         except Exception as exc:
             import traceback as _tb
             tb_text = _tb.format_exc()

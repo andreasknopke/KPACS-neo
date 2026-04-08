@@ -406,7 +406,17 @@ public partial class DicomViewPanel
             contour.Anchors.ToList(),
             contour.IsClosed)));
 
-        return $"3D ROI\nSlices {measurement.VolumeContours.Length}  Volume {volume / 1000.0:F1} ml";
+        string title = _measurementTitleProvider?.Invoke(measurement)?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            title = "3D ROI";
+        }
+
+        string summary = $"Slices {measurement.VolumeContours.Length}  Volume {volume / 1000.0:F1} ml";
+        string supplement = _measurementTextSupplementProvider?.Invoke(measurement, [])?.Trim() ?? string.Empty;
+        return string.IsNullOrWhiteSpace(supplement)
+            ? $"{title}\n{summary}"
+            : $"{title}\n{summary}\n{supplement}";
     }
 
     private Point GetVolumeRoiLabelAnchor(StudyMeasurement measurement, DicomSpatialMetadata metadata)

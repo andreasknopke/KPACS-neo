@@ -118,13 +118,23 @@ public partial class StudyViewerWindow
         _currentVolumeRoiDraftPreview = preview;
         _lastVolumeRoiPreviewSnapshot = preview;
         _lastVolumeRoiPreviewWasDraft = isDraft;
+        StudyMeasurement? selectedVolumeRoi = !isDraft
+            ? GetSelectedVolumeRoiMeasurement()
+            : null;
+        ApplyVolumeRoiPreviewChrome(selectedVolumeRoi, isDraft);
         VolumeRoiAddButton.IsVisible = isDraft && preview.SupportsAdditiveMode;
         VolumeRoiAddButton.IsChecked = isDraft && preview.IsAdditiveModeEnabled;
         VolumeRoiDraftPinButton.IsChecked = _volumeRoiPreviewPinned;
-        VolumeRoiDraftTitleText.Text = isDraft ? "3D ROI draft" : "3D ROI model";
-        VolumeRoiDraftStatusText.Text = isDraft
+        VolumeRoiDraftTitleText.Text = isDraft
+            ? "3D ROI draft"
+            : BuildSavedVolumeRoiPreviewTitle(selectedVolumeRoi);
+        string statusText = isDraft
             ? $"{preview.OrientationLabel} · {preview.ContourCount} drawn · {preview.SliceCount} mesh slices · {(preview.VolumeCubicMillimeters / 1000.0):F1} ml"
             : $"{preview.OrientationLabel} · {preview.ContourCount} source slices · {preview.SliceCount} mesh slices · {(preview.VolumeCubicMillimeters / 1000.0):F1} ml";
+        string secondaryLabel = selectedVolumeRoi is null ? string.Empty : GetMeasurementSecondaryLabel(selectedVolumeRoi) ?? string.Empty;
+        VolumeRoiDraftStatusText.Text = string.IsNullOrWhiteSpace(secondaryLabel)
+            ? statusText
+            : $"{secondaryLabel} · {statusText}";
         UpdateVolumeRoiCorrectionControls(preview, isDraft);
         VolumeRoiDraftHintText.Text = isDraft
             ? preview.IsAdditiveModeEnabled
@@ -141,6 +151,7 @@ public partial class StudyViewerWindow
     private void HideVolumeRoiDraftPanel()
     {
         _currentVolumeRoiDraftPreview = null;
+        ApplyVolumeRoiPreviewChrome(null, isDraft: true);
         VolumeRoiDraftTitleText.Text = "3D ROI draft";
         VolumeRoiAddButton.IsVisible = false;
         VolumeRoiAddButton.IsChecked = false;
@@ -154,6 +165,40 @@ public partial class StudyViewerWindow
         VolumeRoiDraftHintText.Text = "Click to place points, double-click without a line to auto-outline, or double-click with a line to close a slice contour. Scroll to another slice, use ↔/↕ or arrow keys to rotate the mesh preview, enable auto if desired, then press Enter to finish or Esc to cancel.";
         VolumeRoiDraftPanel.IsVisible = false;
         UpdateVolumeRoiAutoRotateState();
+    }
+
+    private string BuildSavedVolumeRoiPreviewTitle(StudyMeasurement? measurement)
+    {
+        if (measurement is null)
+        {
+            return "3D ROI model";
+        }
+
+        string title = GetMeasurementDisplayTitle(measurement) ?? "3D ROI";
+        return $"{title} model";
+    }
+
+    private void ApplyVolumeRoiPreviewChrome(StudyMeasurement? measurement, bool isDraft)
+    {
+        Color accent = !isDraft && measurement is not null
+            ? GetMeasurementAccentColor(measurement) ?? Color.Parse("#FF56D3C2")
+            : Color.Parse("#FF6D9ED6");
+
+        VolumeRoiDraftPanel.BorderBrush = new SolidColorBrush(Color.FromArgb(0xB8, accent.R, accent.G, accent.B));
+        VolumeRoiDraftPanel.Background = new SolidColorBrush(Color.FromArgb(0xE6, 0x14, 0x18, 0x20));
+        VolumeRoiDraftTitleText.Foreground = new SolidColorBrush(BlendVolumeRoiPreviewChrome(accent, Colors.White, 0.32));
+        VolumeRoiDraftStatusText.Foreground = new SolidColorBrush(BlendVolumeRoiPreviewChrome(accent, Color.Parse("#FFD8E5F0"), 0.48));
+        VolumeRoiDraftHintText.Foreground = new SolidColorBrush(Color.Parse("#FF9DB3C7"));
+    }
+
+    private static Color BlendVolumeRoiPreviewChrome(Color start, Color end, double amount)
+    {
+        double clamped = Math.Clamp(amount, 0, 1);
+        byte a = (byte)Math.Round(start.A + ((end.A - start.A) * clamped));
+        byte r = (byte)Math.Round(start.R + ((end.R - start.R) * clamped));
+        byte g = (byte)Math.Round(start.G + ((end.G - start.G) * clamped));
+        byte b = (byte)Math.Round(start.B + ((end.B - start.B) * clamped));
+        return Color.FromArgb(a, r, g, b);
     }
 
     private void OnVolumeRoiAddClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)

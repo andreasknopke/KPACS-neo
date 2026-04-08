@@ -23,6 +23,12 @@ public partial class StudyViewerWindow
     private string? GetMeasurementTextSupplement(StudyMeasurement measurement, Point[] imagePoints)
     {
         _ = imagePoints;
+
+        if (measurement.Kind == MeasurementKind.VolumeRoi)
+        {
+            return GetMeasurementSecondaryLabel(measurement);
+        }
+
         return _measurementInsightCache.TryGetValue(measurement.Id, out string? text)
             ? text
             : null;

@@ -36,7 +36,9 @@ public partial class StudyViewerWindow
         panel.SetCenterlineOverlays(GetCenterlineOverlaysForSlot(slot));
         panel.SetSegmentationMaskResolver(ResolveSegmentationMask);
         panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
+        panel.SetMeasurementTitleProvider(GetMeasurementDisplayTitle);
         panel.SetMeasurementTextSupplementProvider(GetMeasurementTextSupplement);
+        panel.SetMeasurementAccentColorProvider(GetMeasurementAccentColor);
         panel.MeasurementCreated += OnPanelMeasurementCreated;
         panel.MeasurementUpdated += OnPanelMeasurementUpdated;
         panel.MeasurementDeleted += OnPanelMeasurementDeleted;
@@ -61,6 +63,9 @@ public partial class StudyViewerWindow
         slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
         slot.Panel.SetCenterlineOverlays(GetCenterlineOverlaysForSlot(slot));
         slot.Panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
+        slot.Panel.SetMeasurementTitleProvider(GetMeasurementDisplayTitle);
+        slot.Panel.SetMeasurementTextSupplementProvider(GetMeasurementTextSupplement);
+        slot.Panel.SetMeasurementAccentColorProvider(GetMeasurementAccentColor);
         RefreshMeasurementInsightPanel();
         ScheduleVolumeRoiDraftPanelRefresh();
         RefreshVolumeRoiDeveloperWorkspacePanel(forceVisible: _volumeRoiDeveloperPanelVisible || _volumeRoiDeveloperPanelPinned);
@@ -83,6 +88,9 @@ public partial class StudyViewerWindow
             slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
             slot.Panel.SetCenterlineOverlays(GetCenterlineOverlaysForSlot(slot));
             slot.Panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
+            slot.Panel.SetMeasurementTitleProvider(GetMeasurementDisplayTitle);
+            slot.Panel.SetMeasurementTextSupplementProvider(GetMeasurementTextSupplement);
+            slot.Panel.SetMeasurementAccentColorProvider(GetMeasurementAccentColor);
         }
 
         RefreshMeasurementInsightPanel();

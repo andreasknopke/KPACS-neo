@@ -55,7 +55,7 @@
       "description": "High-resolution cardiac chamber segmentation.",
       "supportedModalities": ["CT"],
       "structureCount": 16,
-      "requiresLicense": false
+      "requiresLicense": true
     },
     {
       "id": "cerebral_bleed",
@@ -71,7 +71,7 @@
       "description": "Coronary artery segmentation from CTA.",
       "supportedModalities": ["CT"],
       "structureCount": 3,
-      "requiresLicense": false
+      "requiresLicense": true
     },
     {
       "id": "tissue_types",

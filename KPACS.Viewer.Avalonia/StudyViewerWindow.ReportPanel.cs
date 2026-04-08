@@ -476,12 +476,14 @@ public partial class StudyViewerWindow
         RegionGuess region = sourceWindow.ResolveMeasurementRegion(measurement, slot);
         AnatomyGuess anatomy = sourceWindow.ResolveMeasurementAnatomy(measurement, slot, region);
         string typeLabel = GetMeasurementTypeLabel(measurement);
-        string title = typeLabel;
+        string title = measurement.Kind == MeasurementKind.VolumeRoi
+            ? sourceWindow.GetMeasurementDisplayTitle(measurement) ?? typeLabel
+            : typeLabel;
         if (measurement.Kind == MeasurementKind.Annotation && !string.IsNullOrWhiteSpace(measurement.AnnotationText))
         {
             title = measurement.AnnotationText.Trim();
         }
-        else if (!string.IsNullOrWhiteSpace(measurement.Tracking?.Label))
+        else if (measurement.Kind != MeasurementKind.VolumeRoi && !string.IsNullOrWhiteSpace(measurement.Tracking?.Label))
         {
             title = $"{typeLabel} · {measurement.Tracking.Label.Trim()}";
         }
@@ -500,7 +502,7 @@ public partial class StudyViewerWindow
             details,
             CombineReportHints(region.Hint, anatomy.Hint),
             measurement.Id == sourceWindow._selectedMeasurementId,
-            GetAccentColor(typeLabel),
+            sourceWindow.GetMeasurementAccentHex(measurement),
             region.IsLearned,
             region.Confidence,
             anatomy.IsLearned,
@@ -1073,6 +1075,12 @@ public partial class StudyViewerWindow
             return new RegionGuess(manualOverride.Trim(), estimatedAutoLabel, $"Manual region override. Auto suggestion: {estimatedAutoLabel}.", true);
         }
 
+        if (TryGetSegmentationBackedMeasurementDisplay(measurement, out _, out string segmentationRegion) &&
+            !string.IsNullOrWhiteSpace(segmentationRegion))
+        {
+            return new RegionGuess(segmentationRegion, segmentationRegion, "Segmentation plugin supplied the region label.");
+        }
+
         RegionGuess estimated = EstimateMeasurementRegion(measurement, slot);
 
         if (!string.Equals(estimated.Label, "Unassigned", StringComparison.OrdinalIgnoreCase))
@@ -1098,6 +1106,196 @@ public partial class StudyViewerWindow
         return estimated;
     }
 
+    private string? GetMeasurementDisplayTitle(StudyMeasurement measurement)
+    {
+        if (measurement.Kind != MeasurementKind.VolumeRoi)
+        {
+            return null;
+        }
+
+        ViewportSlot? slot = FindSlotForMeasurement(measurement) ?? _activeSlot;
+        if (TryGetSegmentationBackedMeasurementDisplay(measurement, out string? segmentationTitle, out _) &&
+            !HasManualMeasurementAnatomyOverride(measurement))
+        {
+            return segmentationTitle;
+        }
+
+        string anatomyLabel = GetAssignedMeasurementAnatomyLabel(measurement, slot);
+        if (!string.IsNullOrWhiteSpace(anatomyLabel))
+        {
+            return anatomyLabel;
+        }
+
+        string regionLabel = GetAssignedMeasurementRegionLabel(measurement, slot);
+        if (!string.IsNullOrWhiteSpace(regionLabel))
+        {
+            return regionLabel;
+        }
+
+        if (measurement.SegmentationMaskId is Guid segmentationMaskId &&
+            _segmentationMasks.TryGetValue(segmentationMaskId, out SegmentationMask3D? segmentationMask) &&
+            !string.IsNullOrWhiteSpace(segmentationMask.Name))
+        {
+            return segmentationMask.Name.Trim();
+        }
+
+        return null;
+    }
+
+    private string? GetMeasurementSecondaryLabel(StudyMeasurement measurement)
+    {
+        if (measurement.Kind != MeasurementKind.VolumeRoi)
+        {
+            return null;
+        }
+
+        if (TryGetSegmentationBackedMeasurementDisplay(measurement, out _, out string? segmentationRegion) &&
+            !HasManualMeasurementRegionOverride(measurement))
+        {
+            return segmentationRegion;
+        }
+
+        ViewportSlot? slot = FindSlotForMeasurement(measurement) ?? _activeSlot;
+        string regionLabel = GetAssignedMeasurementRegionLabel(measurement, slot);
+        string anatomyLabel = GetAssignedMeasurementAnatomyLabel(measurement, slot);
+        if (!string.IsNullOrWhiteSpace(regionLabel) &&
+            !string.IsNullOrWhiteSpace(anatomyLabel) &&
+            !string.Equals(regionLabel, anatomyLabel, StringComparison.OrdinalIgnoreCase))
+        {
+            return regionLabel;
+        }
+
+        return string.IsNullOrWhiteSpace(regionLabel)
+            ? null
+            : regionLabel;
+    }
+
+    private string GetMeasurementAccentHex(StudyMeasurement measurement)
+    {
+        Color color = GetMeasurementAccentColor(measurement) ?? Color.Parse(GetAccentColor(GetMeasurementTypeLabel(measurement)));
+        return $"#FF{color.R:X2}{color.G:X2}{color.B:X2}";
+    }
+
+    private Color? GetMeasurementAccentColor(StudyMeasurement measurement)
+    {
+        if (measurement.Kind != MeasurementKind.VolumeRoi)
+        {
+            return null;
+        }
+
+        if (TryGetSegmentationBackedMeasurementDisplay(measurement, out _, out string? segmentationRegion) &&
+            !HasManualMeasurementRegionOverride(measurement))
+        {
+            return ResolveAnatomyRegionAccentColor(segmentationRegion);
+        }
+
+        ViewportSlot? slot = FindSlotForMeasurement(measurement) ?? _activeSlot;
+        string regionLabel = GetAssignedMeasurementRegionLabel(measurement, slot);
+        return ResolveAnatomyRegionAccentColor(regionLabel);
+    }
+
+    private bool TryGetSegmentationBackedMeasurementDisplay(StudyMeasurement measurement, out string title, out string region)
+    {
+        title = string.Empty;
+        region = string.Empty;
+
+        if (measurement.SegmentationMaskId is not Guid segmentationMaskId ||
+            !_segmentationMasks.TryGetValue(segmentationMaskId, out SegmentationMask3D? segmentationMask))
+        {
+            return false;
+        }
+
+        title = segmentationMask.Name?.Trim() ?? string.Empty;
+        region = ExtractSegmentationRegionLabel(segmentationMask.Metadata.Notes);
+        return !string.IsNullOrWhiteSpace(title) || !string.IsNullOrWhiteSpace(region);
+    }
+
+    private bool HasManualMeasurementRegionOverride(StudyMeasurement measurement) =>
+        _reportRegionOverrides.TryGetValue(measurement.Id, out string? regionOverride) &&
+        !string.IsNullOrWhiteSpace(regionOverride);
+
+    private bool HasManualMeasurementAnatomyOverride(StudyMeasurement measurement) =>
+        _reportAnatomyOverrides.TryGetValue(measurement.Id, out string? anatomyOverride) &&
+        !string.IsNullOrWhiteSpace(anatomyOverride);
+
+    private static string ExtractSegmentationRegionLabel(string? notes)
+    {
+        if (string.IsNullOrWhiteSpace(notes))
+        {
+            return string.Empty;
+        }
+
+        const string marker = "Region:";
+        int markerIndex = notes.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (markerIndex < 0)
+        {
+            return string.Empty;
+        }
+
+        string region = notes[(markerIndex + marker.Length)..].Trim();
+        int delimiterIndex = region.IndexOfAny([',', ';', '\n', '\r']);
+        if (delimiterIndex >= 0)
+        {
+            region = region[..delimiterIndex].Trim();
+        }
+
+        return NormalizeAssignedMeasurementLabel(region);
+    }
+
+    private string GetAssignedMeasurementRegionLabel(StudyMeasurement measurement, ViewportSlot? slot)
+    {
+        if (TryGetSegmentationBackedMeasurementDisplay(measurement, out _, out string segmentationRegion) &&
+            !HasManualMeasurementRegionOverride(measurement))
+        {
+            return segmentationRegion;
+        }
+
+        string label = _reportRegionOverrides.TryGetValue(measurement.Id, out string? regionOverride) && !string.IsNullOrWhiteSpace(regionOverride)
+            ? regionOverride.Trim()
+            : ResolveMeasurementRegion(measurement, slot).Label;
+        return NormalizeAssignedMeasurementLabel(label);
+    }
+
+    private string GetAssignedMeasurementAnatomyLabel(StudyMeasurement measurement, ViewportSlot? slot)
+    {
+        if (TryGetSegmentationBackedMeasurementDisplay(measurement, out string segmentationTitle, out _) &&
+            !HasManualMeasurementAnatomyOverride(measurement))
+        {
+            return NormalizeAssignedMeasurementLabel(segmentationTitle);
+        }
+
+        string label = _reportAnatomyOverrides.TryGetValue(measurement.Id, out string? anatomyOverride) && !string.IsNullOrWhiteSpace(anatomyOverride)
+            ? anatomyOverride.Trim()
+            : ResolveMeasurementAnatomy(measurement, slot).Label;
+        return NormalizeAssignedMeasurementLabel(label);
+    }
+
+    private static string NormalizeAssignedMeasurementLabel(string? label)
+    {
+        string normalized = label?.Trim() ?? string.Empty;
+        return string.IsNullOrWhiteSpace(normalized) ||
+               string.Equals(normalized, "Auto", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(normalized, "Unassigned", StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
+            : normalized;
+    }
+
+    private static Color ResolveAnatomyRegionAccentColor(string? regionLabel) => (regionLabel?.Trim().ToLowerInvariant() ?? string.Empty) switch
+    {
+        "neuro" => Color.Parse("#FF8C7CFF"),
+        "thorax" => Color.Parse("#FF48C7C2"),
+        "thoraxabdomen" => Color.Parse("#FF49C9A2"),
+        "thorax abdomen" => Color.Parse("#FF49C9A2"),
+        "abdomen" => Color.Parse("#FFE0B85A"),
+        "abdomenpelvis" => Color.Parse("#FFD99A68"),
+        "abdomen pelvis" => Color.Parse("#FFD99A68"),
+        "pelvis" => Color.Parse("#FFD77AA8"),
+        "shoulder" => Color.Parse("#FF6FA8FF"),
+        "knee" => Color.Parse("#FF72D38E"),
+        "ankle" => Color.Parse("#FFF3A65E"),
+        _ => Color.Parse("#FF56D3C2"),
+    };
+
     private AnatomyGuess ResolveMeasurementAnatomy(StudyMeasurement measurement, ViewportSlot? slot, RegionGuess? resolvedRegion = null)
     {
         RegionGuess region = resolvedRegion ?? ResolveMeasurementRegion(measurement, slot);
@@ -1108,6 +1306,12 @@ public partial class StudyViewerWindow
         {
             AnatomyGuess estimatedOverride = EstimateMeasurementAnatomy(measurement, slot, region);
             return new AnatomyGuess(manualLabel.Trim(), $"Manually confirmed in report panel. Auto suggestion: {estimatedOverride.DisplayLabel}.", true);
+        }
+
+        if (TryGetSegmentationBackedMeasurementDisplay(measurement, out string segmentationTitle, out _) &&
+            !string.IsNullOrWhiteSpace(segmentationTitle))
+        {
+            return new AnatomyGuess(segmentationTitle, "Segmentation plugin supplied the structure label.");
         }
 
         if (TryFindKnowledgePackStructureMatch(measurement, slot, requiredRegionLabel, out PackStructureMatch packMatch))

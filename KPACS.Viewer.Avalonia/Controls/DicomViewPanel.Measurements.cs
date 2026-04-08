@@ -48,7 +48,9 @@ public partial class DicomViewPanel
     private Guid? _selectedMeasurementId;
     private MeasurementDraft? _measurementDraft;
     private MeasurementEditSession? _measurementEditSession;
+    private Func<StudyMeasurement, string?>? _measurementTitleProvider;
     private Func<StudyMeasurement, Point[], string?>? _measurementTextSupplementProvider;
+    private Func<StudyMeasurement, Color?>? _measurementAccentColorProvider;
     private Func<StudyMeasurement, bool>? _measurementVisibilityProvider;
     private Func<Guid, SegmentationMask3D?>? _segmentationMaskResolver;
     private readonly Stack<RoiHistoryEntry> _roiUndoHistory = [];
@@ -79,6 +81,18 @@ public partial class DicomViewPanel
     public void SetMeasurementTextSupplementProvider(Func<StudyMeasurement, Point[], string?>? provider)
     {
         _measurementTextSupplementProvider = provider;
+        UpdateMeasurementPresentation();
+    }
+
+    public void SetMeasurementTitleProvider(Func<StudyMeasurement, string?>? provider)
+    {
+        _measurementTitleProvider = provider;
+        UpdateMeasurementPresentation();
+    }
+
+    public void SetMeasurementAccentColorProvider(Func<StudyMeasurement, Color?>? provider)
+    {
+        _measurementAccentColorProvider = provider;
         UpdateMeasurementPresentation();
     }
 
@@ -1401,7 +1415,13 @@ public partial class DicomViewPanel
     {
         IBrush stroke = new SolidColorBrush(rendered.IsSelected ? Color.Parse("#FFFFD54F") : Color.Parse("#FF35C7FF"));
         IBrush fill = new SolidColorBrush(rendered.IsSelected ? Color.Parse("#20FFD54F") : Color.Parse("#1035C7FF"));
-        if (rendered.Measurement.Kind == MeasurementKind.VolumeRoi)
+        if (rendered.Measurement.Kind == MeasurementKind.VolumeRoi &&
+            _measurementAccentColorProvider?.Invoke(rendered.Measurement) is Color accentColor)
+        {
+            stroke = new SolidColorBrush(ResolveMeasurementAccentColor(accentColor, rendered.IsSelected, rendered.IsInterpolatedVolumeSlice));
+            fill = new SolidColorBrush(ResolveMeasurementFillColor(accentColor, rendered.IsSelected, rendered.IsInterpolatedVolumeSlice));
+        }
+        else if (rendered.Measurement.Kind == MeasurementKind.VolumeRoi)
         {
             stroke = new SolidColorBrush(rendered.IsSelected
                 ? rendered.IsInterpolatedVolumeSlice ? Color.Parse("#FFF9E27D") : Color.Parse("#FFFFD54F")
@@ -2279,7 +2299,7 @@ public partial class DicomViewPanel
             return null;
         }
 
-        Border border = CreateMeasurementLabelBorder(isSelected, text);
+        Border border = CreateMeasurementLabelBorder(isSelected, text, _measurementAccentColorProvider?.Invoke(measurement));
         border.Measure(s_unboundedMeasureSize);
 
         Point anchor = GetMeasurementLabelAnchor(measurement, controlPoints);
@@ -2311,20 +2331,64 @@ public partial class DicomViewPanel
         _ => controlPoints.Length > 0 ? controlPoints[0] : default,
     };
 
-    private Border CreateMeasurementLabelBorder(bool isSelected, string text) => new()
+    private Border CreateMeasurementLabelBorder(bool isSelected, string text, Color? accentColor = null)
     {
-        Background = new SolidColorBrush(Color.Parse("#B0101010")),
-        BorderBrush = new SolidColorBrush(isSelected ? Color.Parse("#FFFFD54F") : Color.Parse("#8040D8FF")),
+        Color borderColor = accentColor is Color accent
+            ? ResolveMeasurementAccentColor(accent, isSelected, isInterpolatedVolumeSlice: false)
+            : isSelected
+                ? Color.Parse("#FFFFD54F")
+                : Color.Parse("#8040D8FF");
+        Color textColor = accentColor is Color labelAccent
+            ? BlendColors(labelAccent, Color.Parse("#FFFFFBF0"), 0.35)
+            : Color.Parse("#FFFFF6A8");
+
+        return new Border
+        {
+            Background = new SolidColorBrush(Color.Parse("#B0101010")),
+            BorderBrush = new SolidColorBrush(borderColor),
         BorderThickness = new Thickness(1),
         CornerRadius = new CornerRadius(3),
         Padding = new Thickness(4, 2),
         Child = new TextBlock
         {
             Text = text,
-            Foreground = new SolidColorBrush(Color.Parse("#FFFFF6A8")),
+            Foreground = new SolidColorBrush(textColor),
             FontSize = 11,
         },
-    };
+        };
+    }
+
+    private static Color ResolveMeasurementAccentColor(Color accentColor, bool isSelected, bool isInterpolatedVolumeSlice)
+    {
+        Color resolved = isSelected
+            ? BlendColors(accentColor, Colors.White, 0.28)
+            : accentColor;
+
+        byte alpha = isSelected
+            ? (byte)0xFF
+            : isInterpolatedVolumeSlice
+                ? (byte)0xA8
+                : (byte)0xF2;
+        return Color.FromArgb(alpha, resolved.R, resolved.G, resolved.B);
+    }
+
+    private static Color ResolveMeasurementFillColor(Color accentColor, bool isSelected, bool isInterpolatedVolumeSlice)
+    {
+        byte alpha = isSelected
+            ? (byte)(isInterpolatedVolumeSlice ? 0x12 : 0x2C)
+            : (byte)(isInterpolatedVolumeSlice ? 0x08 : 0x18);
+        return Color.FromArgb(alpha, accentColor.R, accentColor.G, accentColor.B);
+    }
+
+    private static Color BlendColors(Color start, Color end, double amount)
+    {
+        double clamped = Math.Clamp(amount, 0, 1);
+        byte a = (byte)Math.Round(start.A + ((end.A - start.A) * clamped));
+        byte r = (byte)Math.Round(start.R + ((end.R - start.R) * clamped));
+        byte g = (byte)Math.Round(start.G + ((end.G - start.G) * clamped));
+        byte b = (byte)Math.Round(start.B + ((end.B - start.B) * clamped));
+        return Color.FromArgb(a, r, g, b);
+    }
 
     private Border CreateDeveloperAnatomyOverlayLabel(Color accentColor, string title, string modality, double highlightPulse)
     {

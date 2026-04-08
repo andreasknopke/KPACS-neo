@@ -22,6 +22,7 @@ logger = logging.getLogger("kpacs.plugin.totalsegmentator.bridge")
 # ---------------------------------------------------------------------------
 _totalseg_api = None
 _class_map: dict[str, dict[int, str]] | None = None
+_license_check = None
 
 
 def _ensure_totalseg():
@@ -45,6 +46,23 @@ def _ensure_totalseg():
     except ImportError:
         logger.warning("Could not import class_map — structure labels will use fallback logic.")
         _class_map = {}
+
+
+def _get_license_check():
+    """Return TotalSegmentator's offline license checker if available."""
+    global _license_check
+    if _license_check is not None:
+        return _license_check
+
+    try:
+        from totalsegmentator.config import has_valid_license_offline, setup_totalseg
+
+        setup_totalseg()
+        _license_check = has_valid_license_offline
+    except ImportError:
+        _license_check = None
+
+    return _license_check
 
 
 # ---------------------------------------------------------------------------
@@ -173,12 +191,36 @@ def _get_metadata(structure_id: str) -> tuple[str, str]:
     return _infer_display_name(structure_id), _infer_region(structure_id)
 
 
+_LICENSED_TASKS: set[str] = {
+    "coronary_arteries",
+    "heartchambers_highres",
+    "tissue_types",
+}
+
+
 # ---------------------------------------------------------------------------
 #  Bridge class
 # ---------------------------------------------------------------------------
 
 class TotalSegBridge:
     """Thin wrapper around TotalSegmentator's Python API."""
+
+    @staticmethod
+    def _validate_task_prerequisites(task: str) -> None:
+        """Fail fast for known task prerequisites before inference starts."""
+        if task not in _LICENSED_TASKS:
+            return
+
+        license_check = _get_license_check()
+        if license_check is None:
+            logger.warning("Could not import TotalSegmentator license checker for task '%s'.", task)
+            return
+
+        status, message = license_check()
+        if status != "yes":
+            raise RuntimeError(
+                f"Task '{task}' requires a TotalSegmentator license. {message}"
+            )
 
     def run_segmentation(
         self,
@@ -217,6 +259,8 @@ class TotalSegBridge:
 
         fast = task.endswith("_fast") or task.endswith("_fastest")
         actual_task = task.replace("_fastest", "").replace("_fast", "")
+
+        self._validate_task_prerequisites(actual_task)
 
         logger.info(
             "Running TotalSegmentator: input=%s task=%s device=%s fast=%s ml=%s",
@@ -349,7 +393,7 @@ class TotalSegBridge:
                 "name": "Heart Chambers (High-Res)",
                 "description": "High-resolution cardiac chamber segmentation.",
                 "modalities": ["CT"],
-                "requires_license": False,
+                "requires_license": True,
             },
             "cerebral_bleed": {
                 "name": "Cerebral Bleed",
@@ -361,7 +405,7 @@ class TotalSegBridge:
                 "name": "Coronary Arteries",
                 "description": "Coronary artery segmentation from CTA.",
                 "modalities": ["CT"],
-                "requires_license": False,
+                "requires_license": True,
             },
             "body": {
                 "name": "Body Region",

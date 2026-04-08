@@ -102,6 +102,29 @@ public partial class StudyViewerWindow
         string currentStructure = _reportAnatomyOverrides.TryGetValue(selectedRoi.Id, out string? manualStructure) && !string.IsNullOrWhiteSpace(manualStructure)
             ? manualStructure.Trim()
             : ResolveMeasurementAnatomy(selectedRoi, FindSlotForMeasurement(selectedRoi) ?? _activeSlot).Label;
+        Color accentColor = GetMeasurementAccentColor(selectedRoi) ?? Color.Parse("#FF56D3C2");
+        section.BorderBrush = new SolidColorBrush(Color.FromArgb(0x88, accentColor.R, accentColor.G, accentColor.B));
+
+        string assignmentSummary = BuildSelectedRoiAssignmentSummary(selectedRoi, FindSlotForMeasurement(selectedRoi) ?? _activeSlot);
+        if (!string.IsNullOrWhiteSpace(assignmentSummary))
+        {
+            body.Children.Add(new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(0x26, accentColor.R, accentColor.G, accentColor.B)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(0xA8, accentColor.R, accentColor.G, accentColor.B)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(10),
+                Padding = new Thickness(10, 8),
+                Child = new TextBlock
+                {
+                    Text = assignmentSummary,
+                    Foreground = new SolidColorBrush(Color.Parse("#FFF4F9FD")),
+                    FontSize = 10,
+                    FontWeight = FontWeight.SemiBold,
+                    TextWrapping = TextWrapping.Wrap,
+                }
+            });
+        }
 
         List<string> regionOptions = GetAllAnatomyRegionOptions();
         if (!regionOptions.Contains(currentRegion, StringComparer.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(currentRegion))
@@ -1319,7 +1342,32 @@ public partial class StudyViewerWindow
     {
         ViewportSlot? slot = FindSlotForMeasurement(measurement) ?? _activeSlot;
         string seriesLabel = slot?.Series is null ? "No loaded series" : $"{slot.Series.Modality} · Series {slot.Series.SeriesNumber}";
-        return $"{seriesLabel} · Measurement {measurement.Id.ToString("D")[..8]}";
+        string title = GetMeasurementDisplayTitle(measurement) ?? "3D ROI";
+        string regionLabel = GetAssignedMeasurementRegionLabel(measurement, slot);
+        string contextLabel = string.IsNullOrWhiteSpace(regionLabel)
+            ? title
+            : $"{title} · {regionLabel}";
+        return $"{contextLabel} · {seriesLabel} · ROI {measurement.Id.ToString("D")[..8]}";
+    }
+
+    private string BuildSelectedRoiAssignmentSummary(StudyMeasurement measurement, ViewportSlot? slot)
+    {
+        string anatomyLabel = GetAssignedMeasurementAnatomyLabel(measurement, slot);
+        string regionLabel = GetAssignedMeasurementRegionLabel(measurement, slot);
+
+        if (!string.IsNullOrWhiteSpace(anatomyLabel) && !string.IsNullOrWhiteSpace(regionLabel))
+        {
+            return $"Current assignment · {anatomyLabel} ({regionLabel})";
+        }
+
+        if (!string.IsNullOrWhiteSpace(anatomyLabel))
+        {
+            return $"Current assignment · {anatomyLabel}";
+        }
+
+        return string.IsNullOrWhiteSpace(regionLabel)
+            ? string.Empty
+            : $"Current assignment · {regionLabel}";
     }
 
     private async Task ReloadAnatomyKnowledgePacksAsync()
@@ -1635,18 +1683,7 @@ public partial class StudyViewerWindow
         }
 
         ViewportSlot? slot = FindSlotForMeasurement(selectedRoi) ?? _activeSlot;
-        string anatomyLabel = _reportAnatomyOverrides.TryGetValue(selectedRoi.Id, out string? anatomyOverride) && !string.IsNullOrWhiteSpace(anatomyOverride)
-            ? anatomyOverride.Trim()
-            : ResolveMeasurementAnatomy(selectedRoi, slot).Label;
-
-        if (string.IsNullOrWhiteSpace(anatomyLabel)
-            || string.Equals(anatomyLabel, "Auto", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(anatomyLabel, "Unassigned", StringComparison.OrdinalIgnoreCase))
-        {
-            return string.Empty;
-        }
-
-        return anatomyLabel;
+        return GetAssignedMeasurementAnatomyLabel(selectedRoi, slot);
     }
 
     private string GetSelectedRoiAssignedRegionLabel(StudyMeasurement? selectedRoi)
@@ -1657,18 +1694,7 @@ public partial class StudyViewerWindow
         }
 
         ViewportSlot? slot = FindSlotForMeasurement(selectedRoi) ?? _activeSlot;
-        string regionLabel = _reportRegionOverrides.TryGetValue(selectedRoi.Id, out string? regionOverride) && !string.IsNullOrWhiteSpace(regionOverride)
-            ? regionOverride.Trim()
-            : ResolveMeasurementRegion(selectedRoi, slot).Label;
-
-        if (string.IsNullOrWhiteSpace(regionLabel)
-            || string.Equals(regionLabel, "Auto", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(regionLabel, "Unassigned", StringComparison.OrdinalIgnoreCase))
-        {
-            return string.Empty;
-        }
-
-        return regionLabel;
+        return GetAssignedMeasurementRegionLabel(selectedRoi, slot);
     }
 
     private void ToggleDeveloperAnatomyModelProjection()
