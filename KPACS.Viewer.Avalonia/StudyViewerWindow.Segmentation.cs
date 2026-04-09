@@ -25,6 +25,9 @@ using KPACS.Viewer.Models;
 using KPACS.Viewer.Plugins;
 using KPACS.Viewer.Rendering;
 using KPACS.Viewer.Services;
+using System.Globalization;
+using System.IO.MemoryMappedFiles;
+using System.Runtime.InteropServices;
 
 namespace KPACS.Viewer;
 
@@ -40,6 +43,10 @@ public partial class StudyViewerWindow
     private string? _selectedSegmentationTaskId;
     private bool _segmentationRunning;
     private CancellationTokenSource? _segmentationCancellation;
+    private int _segmentationProgressPercent = -1;
+    private string _segmentationProgressStatus = string.Empty;
+    private ProgressBar? _segmentationProgressBar;
+    private TextBlock? _segmentationStatusTextBlock;
     private readonly HashSet<Guid> _visibleSegmentationMaskIds = [];
 
     /// <summary>
@@ -258,20 +265,26 @@ public partial class StudyViewerWindow
         {
             Minimum = 0,
             Maximum = 100,
-            Value = 0,
-            Height = 6,
+            Value = _segmentationProgressPercent >= 0 ? _segmentationProgressPercent : 0,
+            Height = 10,
+            Margin = new Thickness(0, 4, 0, 2),
             IsVisible = _segmentationRunning,
-            IsIndeterminate = false,
+            IsIndeterminate = _segmentationRunning && _segmentationProgressPercent < 0,
         };
+        _segmentationProgressBar = progressBar;
 
         var statusText = new TextBlock
         {
-            Text = _segmentationRunning ? "Preparing…" : string.Empty,
+            Text = _segmentationRunning
+                ? string.IsNullOrWhiteSpace(_segmentationProgressStatus) ? "Preparing…" : _segmentationProgressStatus
+                : string.Empty,
             Foreground = new SolidColorBrush(Color.Parse("#FF9DB3C7")),
-            FontSize = 10,
+            FontSize = 11,
+            Margin = new Thickness(0, 0, 0, 4),
             TextWrapping = Avalonia.Media.TextWrapping.Wrap,
             IsVisible = _segmentationRunning,
         };
+        _segmentationStatusTextBlock = statusText;
 
         // ── Action buttons ──────────────────────────────────────
 
@@ -491,22 +504,21 @@ public partial class StudyViewerWindow
         SeriesVolume volume = slot.Volume;
 
         _segmentationRunning = true;
+        _segmentationProgressPercent = -1;
+        _segmentationProgressStatus = "Starting plugin…";
         _segmentationCancellation = new CancellationTokenSource();
         CancellationToken ct = _segmentationCancellation.Token;
 
         RefreshAnatomyPanel();
 
-        string? tempNiftiPath = null;
+        string? tempVolumePath = null;
+        SharedRawVolumeHandle? sharedVolumeHandle = null;
 
         try
         {
             // Update the UI to show progress.
             await Dispatcher.UIThread.InvokeAsync(() =>
-            {
-                progressBar.IsVisible = true;
-                statusText.IsVisible = true;
-                statusText.Text = "Starting plugin…";
-            });
+                ApplySegmentationProgressState(-1, "Starting plugin…"));
 
             // For remote plugins, update the session/volume context.
             PluginInstance? instance = _pluginManager.GetPlugin(_selectedSegmentationPluginId);
@@ -530,22 +542,45 @@ public partial class StudyViewerWindow
                 "KPACS.Viewer.Avalonia", "seg-output", Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(outputDir);
 
-            // For local plugins, export the in-memory volume to a temporary
-            // NIfTI file so that the out-of-process plugin can read it.
+            // For local plugins, publish the in-memory volume through a named
+            // shared-memory region so the Python sidecar can read the exact
+            // same pages without any temp-file round-trip.
             // Remote plugins already have access to the volume on the server.
             string volumeFilePath = string.Empty;
+            string volumeFormat = "nifti";
             bool isRemotePlugin = instance?.Handle is RemotePluginAdapter;
+            Dictionary<string, string> requestParameters = [];
+            IProgress<ProgressReport> progress = new Progress<ProgressReport>(p =>
+            {
+                Dispatcher.UIThread.Post(() =>
+                {
+                    ApplySegmentationProgressState(
+                        p.PercentComplete,
+                        p.StatusMessage ?? $"Step {p.Step}/{p.TotalSteps}");
+                });
+            });
 
             if (!isRemotePlugin)
             {
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
-                    statusText.Text = "Exporting volume for plugin…";
+                    ApplySegmentationProgressState(-1, "Publishing shared-memory volume…");
                 });
 
-                tempNiftiPath = Path.Combine(outputDir, "input.nii.gz");
-                await Task.Run(() => ExportVolumeAsNifti(volume, tempNiftiPath), ct);
-                volumeFilePath = tempNiftiPath;
+                progress.Report(new ProgressReport
+                {
+                    Step = 0,
+                    TotalSteps = 5,
+                    PercentComplete = 3,
+                    StatusMessage = "Publishing shared-memory volume…",
+                });
+
+                sharedVolumeHandle = await Task.Run(() => CreateSharedRawVolume(volume), ct);
+                volumeFilePath = sharedVolumeHandle.MapName;
+                volumeFormat = "raw";
+                requestParameters = CreateRawVolumeParameters(volume);
+                requestParameters["kpacs.raw.transport"] = "shm";
+                requestParameters["kpacs.raw.map_name"] = sharedVolumeHandle.MapName;
             }
 
             var request = new SegmentationRequest
@@ -553,7 +588,7 @@ public partial class StudyViewerWindow
                 Volume = new VolumeDescriptor
                 {
                     FilePath = volumeFilePath,
-                    Format = "nifti",
+                    Format = volumeFormat,
                     Dimensions = [volume.SizeX, volume.SizeY, volume.SizeZ],
                     SpacingMm = [volume.SpacingX, volume.SpacingY, volume.SpacingZ],
                     Modality = slot.Series?.Modality ?? string.Empty,
@@ -563,17 +598,8 @@ public partial class StudyViewerWindow
                 OutputDirectory = outputDir,
                 Device = "gpu",
                 ProduceMultilabel = true,
+                Parameters = requestParameters,
             };
-
-            // Progress callback that updates the UI.
-            var progress = new Progress<ProgressReport>(p =>
-            {
-                Dispatcher.UIThread.Post(() =>
-                {
-                    progressBar.Value = p.PercentComplete;
-                    statusText.Text = p.StatusMessage ?? $"Step {p.Step}/{p.TotalSteps}";
-                });
-            });
 
             SegmentationResult result = await provider.RunAsync(request, progress, ct);
 
@@ -617,14 +643,21 @@ public partial class StudyViewerWindow
                 // thread so the UI stays responsive during heavy I/O + decode.
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
-                    statusText.Text = "Importing segmentation masks…";
+                    ApplySegmentationProgressState(80, "Importing segmentation masks…");
+                });
+                progress.Report(new ProgressReport
+                {
+                    Step = 4,
+                    TotalSteps = 5,
+                    PercentComplete = 80,
+                    StatusMessage = "Importing segmentation masks…",
                 });
 
                 if (!string.IsNullOrEmpty(result.MultilabelPath) && File.Exists(result.MultilabelPath))
                 {
                     IReadOnlyList<SegmentationMask3D> masks =
                         await Task.Run(() => NiftiMaskConverter.FromMultilabelNiftiAll(
-                            result.MultilabelPath, result.Structures, volume, studyUid), ct);
+                            result.MultilabelPath, result.Structures, volume, studyUid, progress), ct);
 
                     foreach (SegmentationMask3D mask in masks)
                     {
@@ -638,12 +671,23 @@ public partial class StudyViewerWindow
                     var individualMasks = await Task.Run(() =>
                     {
                         var list = new List<SegmentationMask3D>();
+                        int totalStructures = Math.Max(1, result.Structures.Count);
                         foreach (SegmentedStructure structure in result.Structures)
                         {
                             if (string.IsNullOrEmpty(structure.MaskPath) || !File.Exists(structure.MaskPath))
                             {
                                 continue;
                             }
+
+                            int completed = list.Count;
+                            int percent = 82 + (completed * 16 / totalStructures);
+                            progress.Report(new ProgressReport
+                            {
+                                Step = 4,
+                                TotalSteps = 5,
+                                PercentComplete = percent,
+                                StatusMessage = $"Importing {structure.DisplayName ?? structure.Id}…",
+                            });
 
                             list.Add(NiftiMaskConverter.FromBinaryNifti(
                                 structure.MaskPath,
@@ -693,20 +737,43 @@ public partial class StudyViewerWindow
         finally
         {
             _segmentationRunning = false;
+            _segmentationProgressPercent = -1;
+            _segmentationProgressStatus = string.Empty;
             _segmentationCancellation?.Dispose();
             _segmentationCancellation = null;
 
-            // Clean up the temporary NIfTI input file (best-effort).
-            if (tempNiftiPath is not null)
+            sharedVolumeHandle?.Dispose();
+
+            // Clean up any temporary file-based input fallback (best-effort).
+            if (tempVolumePath is not null)
             {
                 _ = Task.Run(() =>
                 {
-                    try { File.Delete(tempNiftiPath); }
+                    try { File.Delete(tempVolumePath); }
                     catch { /* best-effort */ }
                 });
             }
 
             await Dispatcher.UIThread.InvokeAsync(() => RefreshAnatomyPanel());
+        }
+    }
+
+    private void ApplySegmentationProgressState(int percentComplete, string statusMessage)
+    {
+        _segmentationProgressPercent = percentComplete;
+        _segmentationProgressStatus = statusMessage;
+
+        if (_segmentationProgressBar is not null)
+        {
+            _segmentationProgressBar.IsVisible = _segmentationRunning;
+            _segmentationProgressBar.IsIndeterminate = _segmentationRunning && percentComplete < 0;
+            _segmentationProgressBar.Value = percentComplete >= 0 ? percentComplete : 0;
+        }
+
+        if (_segmentationStatusTextBlock is not null)
+        {
+            _segmentationStatusTextBlock.IsVisible = _segmentationRunning;
+            _segmentationStatusTextBlock.Text = _segmentationRunning ? statusMessage : string.Empty;
         }
     }
 
@@ -848,113 +915,83 @@ public partial class StudyViewerWindow
         _visibleSegmentationMaskIds.Add(defaultVisibleMask.Id);
     }
 
+    private static Dictionary<string, string> CreateRawVolumeParameters(SeriesVolume volume)
+    {
+        var parameters = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["kpacs.raw.dtype"] = "int16-le",
+            ["kpacs.raw.origin_lps"] = FormatRawVector(volume.Origin.X, volume.Origin.Y, volume.Origin.Z),
+            ["kpacs.raw.row_lps"] = FormatRawVector(volume.RowDirection.X, volume.RowDirection.Y, volume.RowDirection.Z),
+            ["kpacs.raw.column_lps"] = FormatRawVector(volume.ColumnDirection.X, volume.ColumnDirection.Y, volume.ColumnDirection.Z),
+            ["kpacs.raw.normal_lps"] = FormatRawVector(volume.Normal.X, volume.Normal.Y, volume.Normal.Z),
+        };
+
+        return parameters;
+    }
+
+    private static string FormatRawVector(double x, double y, double z) =>
+        string.Join(";",
+            x.ToString("R", CultureInfo.InvariantCulture),
+            y.ToString("R", CultureInfo.InvariantCulture),
+            z.ToString("R", CultureInfo.InvariantCulture));
+
     /// <summary>
-    /// Write a <see cref="SeriesVolume"/> as a minimal NIfTI-1 .nii.gz file
-    /// so that out-of-process plugins receive a standard neuroimaging input format.
-    /// Ported from <c>PluginProxyServiceImpl.ExportVolumeAsNifti</c> in the render server.
+    /// Publish the volume through a named shared-memory mapping.
+    /// The plugin opens the same mapping by name and wraps it as a NumPy array.
     /// </summary>
-    private static void ExportVolumeAsNifti(SeriesVolume volume, string outputPath)
+    private static SharedRawVolumeHandle CreateSharedRawVolume(SeriesVolume volume)
+    {
+        if (!string.IsNullOrWhiteSpace(volume.SharedRawMapName))
+        {
+            return new SharedRawVolumeHandle(volume.SharedRawMapName, mapping: null);
+        }
+
+        short[] voxelArray = volume.GetVoxelsArrayForInterop();
+        long capacityBytes = checked((long)voxelArray.Length * sizeof(short));
+        string mapName = $@"Local\kpacs-seg-{Guid.NewGuid():N}";
+        MemoryMappedFile mmf = MemoryMappedFile.CreateNew(
+            mapName,
+            capacityBytes,
+            MemoryMappedFileAccess.ReadWrite,
+            MemoryMappedFileOptions.None,
+            HandleInheritability.None);
+
+        using (MemoryMappedViewAccessor accessor = mmf.CreateViewAccessor(0, capacityBytes, MemoryMappedFileAccess.Write))
+        {
+            accessor.WriteArray(0, voxelArray, 0, voxelArray.Length);
+            accessor.Flush();
+        }
+
+        return new SharedRawVolumeHandle(mapName, mmf);
+    }
+
+    /// <summary>
+    /// Write a <see cref="SeriesVolume"/> as a raw little-endian INT16 file.
+    /// The plugin reconstructs the affine from request metadata and loads the
+    /// payload directly into an in-memory NIfTI image for TotalSegmentator.
+    /// </summary>
+    private static void ExportVolumeAsRawInt16(SeriesVolume volume, string outputPath)
     {
         using FileStream fs = File.Create(outputPath);
-        using var gz = new System.IO.Compression.GZipStream(fs, System.IO.Compression.CompressionLevel.Fastest);
-        using var bw = new BinaryWriter(gz);
+        short[] voxels = volume.GetVoxelsArrayForInterop();
+        fs.Write(MemoryMarshal.AsBytes<short>(voxels.AsSpan()));
+    }
 
-        int nx = volume.SizeX, ny = volume.SizeY, nz = volume.SizeZ;
+    private sealed class SharedRawVolumeHandle : IDisposable
+    {
+        private readonly MemoryMappedFile? _mapping;
 
-        // NIfTI-1 header (348 bytes).
-        bw.Write(348);              // sizeof_hdr
-        bw.Write(new byte[28]);     // data_type (10) + db_name (18)
-        bw.Write(0);                // extents
-        bw.Write((short)0);         // session_error
-        bw.Write((byte)'r');        // regular
-        bw.Write((byte)0);          // dim_info
-
-        // dim[0..7]
-        bw.Write((short)3);         // ndim
-        bw.Write((short)nx);
-        bw.Write((short)ny);
-        bw.Write((short)nz);
-        bw.Write((short)1); bw.Write((short)1); bw.Write((short)1); bw.Write((short)1);
-
-        bw.Write(0f); bw.Write(0f); bw.Write(0f); // intent_p1/2/3
-        bw.Write((short)0);         // intent_code
-        bw.Write((short)4);         // datatype = INT16
-        bw.Write((short)16);        // bitpix
-        bw.Write((short)0);         // slice_start
-
-        // pixdim[0..7]
-        bw.Write(1f);               // qfac
-        bw.Write((float)volume.SpacingX);
-        bw.Write((float)volume.SpacingY);
-        bw.Write((float)volume.SpacingZ);
-        bw.Write(0f); bw.Write(0f); bw.Write(0f); bw.Write(0f);
-
-        bw.Write(352f);             // vox_offset
-        bw.Write(1f);               // scl_slope
-        bw.Write(0f);               // scl_inter
-        bw.Write((short)0);         // slice_end
-        bw.Write((byte)0);          // slice_code
-        bw.Write((byte)2);          // xyzt_units = NIFTI_UNITS_MM
-
-        bw.Write(0f); bw.Write(0f); // cal_max, cal_min
-        bw.Write(0f); bw.Write(0f); // slice_duration, toffset
-        bw.Write(0); bw.Write(0);   // glmax, glmin
-        bw.Write(new byte[80]);     // descrip
-        bw.Write(new byte[24]);     // aux_file
-
-        // Use sform (method 2) to encode the full affine.
-        bw.Write((short)0);         // qform_code = 0 (unknown)
-        bw.Write((short)1);         // sform_code = 1 (scanner anat)
-
-        // quatern (unused since qform_code = 0)
-        bw.Write(0f); bw.Write(0f); bw.Write(0f);
-        bw.Write(0f); bw.Write(0f); bw.Write(0f);
-
-        // srow_x, srow_y, srow_z (4 floats each = 48 bytes)
-        //
-        // DICOM uses LPS (Left-Posterior-Superior) patient coordinates;
-        // NIfTI expects RAS (Right-Anterior-Superior).  Convert by
-        // negating the X and Y rows of the affine matrix.
-        Models.Vector3D row = volume.RowDirection;
-        Models.Vector3D col = volume.ColumnDirection;
-        Models.Vector3D nrm = volume.Normal;
-        Models.Vector3D orig = volume.Origin;
-
-        // srow_x  (RAS X = −LPS X)
-        bw.Write((float)(-row.X * volume.SpacingX));
-        bw.Write((float)(-col.X * volume.SpacingY));
-        bw.Write((float)(-nrm.X * volume.SpacingZ));
-        bw.Write((float)(-orig.X));
-        // srow_y  (RAS Y = −LPS Y)
-        bw.Write((float)(-row.Y * volume.SpacingX));
-        bw.Write((float)(-col.Y * volume.SpacingY));
-        bw.Write((float)(-nrm.Y * volume.SpacingZ));
-        bw.Write((float)(-orig.Y));
-        // srow_z  (RAS Z = LPS Z — unchanged)
-        bw.Write((float)(row.Z * volume.SpacingX));
-        bw.Write((float)(col.Z * volume.SpacingY));
-        bw.Write((float)(nrm.Z * volume.SpacingZ));
-        bw.Write((float)orig.Z);
-
-        bw.Write(new byte[16]);     // intent_name
-        // magic: "n+1\0" — written directly (GZipStream does not support Seek).
-        bw.Write((byte)'n'); bw.Write((byte)'+'); bw.Write((byte)'1'); bw.Write((byte)0);
-
-        // 4-byte extension pad.
-        bw.Write(new byte[4]);
-
-        // Voxel data (INT16, x-fastest).
-        for (int z = 0; z < nz; z++)
+        public SharedRawVolumeHandle(string mapName, MemoryMappedFile? mapping)
         {
-            int sliceBase = z * ny * nx;
-            for (int y = 0; y < ny; y++)
-            {
-                int rowBase = sliceBase + y * nx;
-                for (int x = 0; x < nx; x++)
-                {
-                    bw.Write(volume.Voxels[rowBase + x]);
-                }
-            }
+            MapName = mapName;
+            _mapping = mapping;
+        }
+
+        public string MapName { get; }
+
+        public void Dispose()
+        {
+            _mapping?.Dispose();
         }
     }
 }

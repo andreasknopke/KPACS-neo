@@ -17,8 +17,16 @@ namespace KPACS.Viewer.Rendering;
 /// </summary>
 public sealed class SeriesVolume
 {
-    /// <summary>Contiguous voxel buffer [z * SizeY * SizeX + y * SizeX + x].</summary>
-    public short[] Voxels { get; }
+    private readonly VolumeVoxelBuffer _voxels;
+
+    /// <summary>Total number of voxels stored in the backing buffer.</summary>
+    public int VoxelCount => _voxels.Length;
+
+    /// <summary>
+    /// Named shared-memory map containing the voxel data when the volume was
+    /// loaded into shared backing; otherwise null.
+    /// </summary>
+    public string? SharedRawMapName => _voxels.SharedMapName;
 
     /// <summary>Number of columns (pixels per row).</summary>
     public int SizeX { get; }
@@ -100,8 +108,39 @@ public sealed class SeriesVolume
         string acquisitionNumber,
         IReadOnlyList<string> sliceFilePaths,
         IReadOnlyList<string> sliceSopInstanceUids)
+        : this(
+            VolumeVoxelBuffer.FromArray(voxels),
+            sizeX, sizeY, sizeZ,
+            spacingX, spacingY, spacingZ,
+            origin,
+            rowDirection, columnDirection, normal,
+            defaultWindowCenter, defaultWindowWidth,
+            minValue, maxValue,
+            isMonochrome1,
+            seriesInstanceUid,
+            frameOfReferenceUid,
+            acquisitionNumber,
+            sliceFilePaths,
+            sliceSopInstanceUids)
     {
-        Voxels = voxels;
+    }
+
+    internal SeriesVolume(
+        VolumeVoxelBuffer voxels,
+        int sizeX, int sizeY, int sizeZ,
+        double spacingX, double spacingY, double spacingZ,
+        Vector3D origin,
+        Vector3D rowDirection, Vector3D columnDirection, Vector3D normal,
+        double defaultWindowCenter, double defaultWindowWidth,
+        short minValue, short maxValue,
+        bool isMonochrome1,
+        string seriesInstanceUid,
+        string frameOfReferenceUid,
+        string acquisitionNumber,
+        IReadOnlyList<string> sliceFilePaths,
+        IReadOnlyList<string> sliceSopInstanceUids)
+    {
+        _voxels = voxels;
         SizeX = sizeX;
         SizeY = sizeY;
         SizeZ = sizeZ;
@@ -131,7 +170,7 @@ public sealed class SeriesVolume
     {
         if ((uint)x >= (uint)SizeX || (uint)y >= (uint)SizeY || (uint)z >= (uint)SizeZ)
             return 0;
-        return Voxels[z * SizeY * SizeX + y * SizeX + x];
+        return _voxels[z * SizeY * SizeX + y * SizeX + x];
     }
 
     /// <summary>
@@ -176,14 +215,14 @@ public sealed class SeriesVolume
         double fx = x - x0, fy = y - y0, fz = z - z0;
 
         // Trilinear interpolation
-        double c000 = Voxels[z0 * SizeY * SizeX + y0 * SizeX + x0];
-        double c100 = Voxels[z0 * SizeY * SizeX + y0 * SizeX + x0 + 1];
-        double c010 = Voxels[z0 * SizeY * SizeX + (y0 + 1) * SizeX + x0];
-        double c110 = Voxels[z0 * SizeY * SizeX + (y0 + 1) * SizeX + x0 + 1];
-        double c001 = Voxels[(z0 + 1) * SizeY * SizeX + y0 * SizeX + x0];
-        double c101 = Voxels[(z0 + 1) * SizeY * SizeX + y0 * SizeX + x0 + 1];
-        double c011 = Voxels[(z0 + 1) * SizeY * SizeX + (y0 + 1) * SizeX + x0];
-        double c111 = Voxels[(z0 + 1) * SizeY * SizeX + (y0 + 1) * SizeX + x0 + 1];
+        double c000 = _voxels[z0 * SizeY * SizeX + y0 * SizeX + x0];
+        double c100 = _voxels[z0 * SizeY * SizeX + y0 * SizeX + x0 + 1];
+        double c010 = _voxels[z0 * SizeY * SizeX + (y0 + 1) * SizeX + x0];
+        double c110 = _voxels[z0 * SizeY * SizeX + (y0 + 1) * SizeX + x0 + 1];
+        double c001 = _voxels[(z0 + 1) * SizeY * SizeX + y0 * SizeX + x0];
+        double c101 = _voxels[(z0 + 1) * SizeY * SizeX + y0 * SizeX + x0 + 1];
+        double c011 = _voxels[(z0 + 1) * SizeY * SizeX + (y0 + 1) * SizeX + x0];
+        double c111 = _voxels[(z0 + 1) * SizeY * SizeX + (y0 + 1) * SizeX + x0 + 1];
 
         double c00 = c000 * (1 - fx) + c100 * fx;
         double c10 = c010 * (1 - fx) + c110 * fx;
@@ -238,4 +277,11 @@ public sealed class SeriesVolume
             sliceOrigin,
             RowDirection, ColumnDirection, Normal);
     }
+
+    public void CopyVoxelsTo(int sourceIndex, short[] destination, int destinationIndex, int length)
+    {
+        _voxels.CopyTo(sourceIndex, destination, destinationIndex, length);
+    }
+
+    public short[] GetVoxelsArrayForInterop() => _voxels.GetOrCreateArrayCopy();
 }

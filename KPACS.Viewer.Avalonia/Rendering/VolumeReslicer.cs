@@ -247,7 +247,7 @@ public static class VolumeReslicer
         short[] pixels = new short[width * height];
 
         int srcOffset = z * volume.SizeY * volume.SizeX;
-        Array.Copy(volume.Voxels, srcOffset, pixels, 0, pixels.Length);
+        volume.CopyVoxelsTo(srcOffset, pixels, 0, pixels.Length);
         DicomSpatialMetadata spatial = GetAxialSpatialMetadata(volume, z);
 
         return new ReslicedImage

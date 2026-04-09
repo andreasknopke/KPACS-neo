@@ -7,6 +7,7 @@ computation, and structure metadata resolution.
 from __future__ import annotations
 
 import logging
+import mmap
 import os
 import re
 from pathlib import Path
@@ -63,6 +64,18 @@ def _get_license_check():
         _license_check = None
 
     return _license_check
+
+
+def _parse_triplet(parameters: dict[str, str] | None, key: str, fallback: tuple[float, float, float]) -> tuple[float, float, float]:
+    raw_value = (parameters or {}).get(key, "").strip()
+    if not raw_value:
+        return fallback
+
+    parts = [segment.strip() for segment in raw_value.split(";")]
+    if len(parts) != 3:
+        raise ValueError(f"Parameter '{key}' must contain exactly three ';'-separated values.")
+
+    return float(parts[0]), float(parts[1]), float(parts[2])
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +218,35 @@ _LICENSED_TASKS: set[str] = {
 class TotalSegBridge:
     """Thin wrapper around TotalSegmentator's Python API."""
 
+    def prepare_input(
+        self,
+        input_path: str,
+        input_format: str = "nifti",
+        dimensions: list[int] | None = None,
+        spacing_mm: list[float] | None = None,
+        parameters: dict[str, str] | None = None,
+    ) -> Any:
+        """Prepare a TotalSegmentator-compatible input source."""
+        normalized_format = (input_format or "nifti").strip().lower()
+        if normalized_format != "raw":
+            return input_path
+
+        transport = (parameters or {}).get("kpacs.raw.transport", "file").strip().lower()
+        if transport == "shm":
+            return self._load_shared_raw_volume(
+                map_name=(parameters or {}).get("kpacs.raw.map_name", input_path),
+                dimensions=dimensions,
+                spacing_mm=spacing_mm,
+                parameters=parameters or {},
+            )
+
+        return self._load_raw_volume(
+            input_path=input_path,
+            dimensions=dimensions,
+            spacing_mm=spacing_mm,
+            parameters=parameters or {},
+        )
+
     @staticmethod
     def _validate_task_prerequisites(task: str) -> None:
         """Fail fast for known task prerequisites before inference starts."""
@@ -224,7 +266,7 @@ class TotalSegBridge:
 
     def run_segmentation(
         self,
-        input_path: str,
+        input_source: Any,
         output_dir: str,
         task: str = "total",
         device: str = "gpu",
@@ -236,8 +278,8 @@ class TotalSegBridge:
 
         Parameters
         ----------
-        input_path : str
-            Path to a DICOM directory or a NIfTI file.
+        input_source : str | nibabel.Nifti1Image
+            Path to a DICOM/NIfTI input, or an in-memory NIfTI image.
         output_dir : str
             Directory where per-structure NIfTI masks will be written.
         task : str
@@ -264,7 +306,7 @@ class TotalSegBridge:
 
         logger.info(
             "Running TotalSegmentator: input=%s task=%s device=%s fast=%s ml=%s",
-            input_path, actual_task, device, fast, multilabel,
+            type(input_source).__name__, actual_task, device, fast, multilabel,
         )
 
         # TotalSegmentator treats the `output` parameter differently depending
@@ -277,7 +319,7 @@ class TotalSegBridge:
         if multilabel:
             ml_file = str(Path(output_dir) / "segmentations.nii.gz")
             _totalseg_api(
-                input=input_path,
+                input=input_source,
                 output=ml_file,
                 ml=True,
                 fast=fast,
@@ -289,7 +331,7 @@ class TotalSegBridge:
             )
         else:
             _totalseg_api(
-                input=input_path,
+                input=input_source,
                 output=output_dir,
                 ml=False,
                 fast=fast,
@@ -323,6 +365,128 @@ class TotalSegBridge:
                 )
 
         return {"multilabel_path": multilabel_path}
+
+    @staticmethod
+    def _load_raw_volume(
+        input_path: str,
+        dimensions: list[int] | None,
+        spacing_mm: list[float] | None,
+        parameters: dict[str, str],
+    ) -> Any:
+        import nibabel as nib
+
+        if not dimensions or len(dimensions) != 3:
+            raise ValueError("Raw volume input requires 3 dimensions [x, y, z].")
+
+        if not spacing_mm or len(spacing_mm) != 3:
+            raise ValueError("Raw volume input requires spacing_mm [x, y, z].")
+
+        nx, ny, nz = (int(dimensions[0]), int(dimensions[1]), int(dimensions[2]))
+        sx, sy, sz = (float(spacing_mm[0]), float(spacing_mm[1]), float(spacing_mm[2]))
+
+        if nx <= 0 or ny <= 0 or nz <= 0:
+            raise ValueError("Raw volume dimensions must be positive.")
+
+        dtype_name = parameters.get("kpacs.raw.dtype", "int16-le")
+        if dtype_name != "int16-le":
+            raise ValueError(f"Unsupported raw volume dtype '{dtype_name}'.")
+
+        voxel_count = nx * ny * nz
+        expected_bytes = voxel_count * np.dtype("<i2").itemsize
+        actual_bytes = Path(input_path).stat().st_size
+        if actual_bytes < expected_bytes:
+            raise ValueError(
+                f"Raw volume file is too small: expected at least {expected_bytes} bytes, got {actual_bytes}."
+            )
+
+        row = _parse_triplet(parameters, "kpacs.raw.row_lps", (1.0, 0.0, 0.0))
+        col = _parse_triplet(parameters, "kpacs.raw.column_lps", (0.0, 1.0, 0.0))
+        nrm = _parse_triplet(parameters, "kpacs.raw.normal_lps", (0.0, 0.0, 1.0))
+        orig = _parse_triplet(parameters, "kpacs.raw.origin_lps", (0.0, 0.0, 0.0))
+
+        affine = np.array(
+            [
+                [-row[0] * sx, -col[0] * sy, -nrm[0] * sz, -orig[0]],
+                [-row[1] * sx, -col[1] * sy, -nrm[1] * sz, -orig[1]],
+                [row[2] * sx, col[2] * sy, nrm[2] * sz, orig[2]],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+
+        raw_data = np.memmap(input_path, dtype="<i2", mode="r", shape=(nx, ny, nz), order="F")
+        header = nib.Nifti1Header()
+        header.set_data_dtype(np.int16)
+        header.set_data_shape((nx, ny, nz))
+        header.set_zooms((sx, sy, sz))
+
+        image = nib.Nifti1Image(raw_data, affine, header)
+        image.set_sform(affine, code=1)
+        image.set_qform(affine, code=1)
+        return image
+
+    @staticmethod
+    def _load_shared_raw_volume(
+        map_name: str,
+        dimensions: list[int] | None,
+        spacing_mm: list[float] | None,
+        parameters: dict[str, str],
+    ) -> Any:
+        import nibabel as nib
+
+        if os.name != "nt":
+            raise RuntimeError("Shared-memory raw transport currently requires Windows.")
+
+        if not map_name:
+            raise ValueError("Shared-memory raw transport requires a map name.")
+
+        if not dimensions or len(dimensions) != 3:
+            raise ValueError("Shared-memory raw volume requires 3 dimensions [x, y, z].")
+
+        if not spacing_mm or len(spacing_mm) != 3:
+            raise ValueError("Shared-memory raw volume requires spacing_mm [x, y, z].")
+
+        nx, ny, nz = (int(dimensions[0]), int(dimensions[1]), int(dimensions[2]))
+        sx, sy, sz = (float(spacing_mm[0]), float(spacing_mm[1]), float(spacing_mm[2]))
+
+        if nx <= 0 or ny <= 0 or nz <= 0:
+            raise ValueError("Shared-memory raw volume dimensions must be positive.")
+
+        dtype_name = parameters.get("kpacs.raw.dtype", "int16-le")
+        if dtype_name != "int16-le":
+            raise ValueError(f"Unsupported shared-memory raw dtype '{dtype_name}'.")
+
+        voxel_count = nx * ny * nz
+        expected_bytes = voxel_count * np.dtype("<i2").itemsize
+
+        row = _parse_triplet(parameters, "kpacs.raw.row_lps", (1.0, 0.0, 0.0))
+        col = _parse_triplet(parameters, "kpacs.raw.column_lps", (0.0, 1.0, 0.0))
+        nrm = _parse_triplet(parameters, "kpacs.raw.normal_lps", (0.0, 0.0, 1.0))
+        orig = _parse_triplet(parameters, "kpacs.raw.origin_lps", (0.0, 0.0, 0.0))
+
+        affine = np.array(
+            [
+                [-row[0] * sx, -col[0] * sy, -nrm[0] * sz, -orig[0]],
+                [-row[1] * sx, -col[1] * sy, -nrm[1] * sz, -orig[1]],
+                [row[2] * sx, col[2] * sy, nrm[2] * sz, orig[2]],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+
+        shared_buffer = mmap.mmap(-1, expected_bytes, tagname=map_name, access=mmap.ACCESS_READ)
+        raw_data = np.ndarray(shape=(nx, ny, nz), dtype=np.dtype("<i2"), buffer=shared_buffer, order="F")
+
+        header = nib.Nifti1Header()
+        header.set_data_dtype(np.int16)
+        header.set_data_shape((nx, ny, nz))
+        header.set_zooms((sx, sy, sz))
+
+        image = nib.Nifti1Image(raw_data, affine, header)
+        image.set_sform(affine, code=1)
+        image.set_qform(affine, code=1)
+        image._kpacs_shared_buffer = shared_buffer
+        return image
 
     def parse_results(
         self,

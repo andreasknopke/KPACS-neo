@@ -2553,7 +2553,7 @@ __kernel void FloodFillStep(
         }
 
         ReleaseMem(_cachedVolumeBuffer);
-        _cachedVolumeBuffer = CreateBuffer(MemFlags.ReadOnly | MemFlags.CopyHostPtr, volume.Voxels);
+        _cachedVolumeBuffer = CreateBuffer(MemFlags.ReadOnly | MemFlags.CopyHostPtr, volume.GetVoxelsArrayForInterop());
         _cachedVolume = volume;
     }
 

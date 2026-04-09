@@ -190,7 +190,8 @@ public sealed class VolumeLoaderService
         if (totalVoxels > 1_000_000_000L)
             return null;
 
-        short[] voxels = new short[(int)totalVoxels];
+        VolumeVoxelBuffer voxels = VolumeVoxelBuffer.CreatePreferred((int)totalVoxels);
+        Span<short> voxelSpan = voxels.GetSpan();
         short globalMin = short.MaxValue;
         short globalMax = short.MinValue;
 
@@ -211,7 +212,7 @@ public sealed class VolumeLoaderService
                     double raw = slice.IsSigned ? (double)(short)srcSpan[p] : srcSpan[p];
                     double rescaled = slice.RescaleSlope * raw + slice.RescaleIntercept;
                     short val = (short)Math.Clamp(rescaled, short.MinValue, short.MaxValue);
-                    voxels[destOffset + p] = val;
+                    voxelSpan[destOffset + p] = val;
                     if (val < globalMin) globalMin = val;
                     if (val > globalMax) globalMax = val;
                 }
@@ -224,7 +225,7 @@ public sealed class VolumeLoaderService
                 {
                     double rescaled = slice.RescaleSlope * slice.RawPixelData[p] + slice.RescaleIntercept;
                     short val = (short)Math.Clamp(rescaled, short.MinValue, short.MaxValue);
-                    voxels[destOffset + p] = val;
+                    voxelSpan[destOffset + p] = val;
                     if (val < globalMin) globalMin = val;
                     if (val > globalMax) globalMax = val;
                 }

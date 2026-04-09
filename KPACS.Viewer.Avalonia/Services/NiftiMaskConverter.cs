@@ -60,8 +60,17 @@ public static class NiftiMaskConverter
         string multilabelPath,
         IReadOnlyList<SegmentedStructure> structures,
         SeriesVolume volume,
-        string studyInstanceUid)
+        string studyInstanceUid,
+        IProgress<ProgressReport>? progress = null)
     {
+        progress?.Report(new ProgressReport
+        {
+            Step = 4,
+            TotalSteps = 5,
+            PercentComplete = 82,
+            StatusMessage = "Reading multilabel segmentation…",
+        });
+
         short[] voxelData = ReadNiftiInt16(multilabelPath);
         long totalVoxels = (long)volume.SizeX * volume.SizeY * volume.SizeZ;
         long count = Math.Min(totalVoxels, voxelData.Length);
@@ -100,6 +109,7 @@ public static class NiftiMaskConverter
         int sizeX = volume.SizeX;
         int sizeY = volume.SizeY;
         int sizeZ = volume.SizeZ;
+        int reportStride = Math.Max(1, sizeZ / 24);
 
         // Single pass over the voxel data — dispatch each voxel to its
         // structure and track per-structure bounding boxes.
@@ -124,6 +134,18 @@ public static class NiftiMaskConverter
                         if (z > bbMaxZ[idx]) bbMaxZ[idx] = z;
                     }
                 }
+            }
+
+            if ((z % reportStride) == 0 || z == sizeZ - 1)
+            {
+                int percent = 83 + ((z + 1) * 9 / Math.Max(1, sizeZ));
+                progress?.Report(new ProgressReport
+                {
+                    Step = 4,
+                    TotalSteps = 5,
+                    PercentComplete = percent,
+                    StatusMessage = $"Scanning segmentation volume… ({z + 1}/{sizeZ} slices)",
+                });
             }
         }
 
@@ -150,6 +172,15 @@ public static class NiftiMaskConverter
                 foregrounds[s],
                 $"Label {structures[s].Label}, Region: {structures[s].Region}",
                 stats));
+
+            int percent = 92 + (results.Count * 7 / Math.Max(1, structureCount));
+            progress?.Report(new ProgressReport
+            {
+                Step = 4,
+                TotalSteps = 5,
+                PercentComplete = percent,
+                StatusMessage = $"Building mask {results.Count}/{structureCount}…",
+            });
         }
 
         return results;

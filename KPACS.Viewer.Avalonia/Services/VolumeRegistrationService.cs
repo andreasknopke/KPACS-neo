@@ -272,7 +272,7 @@ public static class VolumeRegistrationService
         }
 
         return expectedLength > 0
-            && volume.Voxels.Length >= expectedLength;
+            && volume.VoxelCount >= expectedLength;
     }
 
     private static VolumeProfile BuildProfile(SeriesVolume volume)

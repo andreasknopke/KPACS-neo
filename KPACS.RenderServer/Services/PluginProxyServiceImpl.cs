@@ -7,6 +7,9 @@
 // ------------------------------------------------------------------------------------------------
 
 using System.Collections.Concurrent;
+using System.Globalization;
+using System.IO.MemoryMappedFiles;
+using System.Runtime.InteropServices;
 using Grpc.Core;
 using KPACS.RenderServer.Protos;
 using KPACS.SDK;
@@ -133,16 +136,19 @@ public sealed class PluginProxyServiceImpl : PluginProxyService.PluginProxyServi
 
         try
         {
-            // Export the volume as a NIfTI file the plugin can read.
-            string niftiPath = Path.Combine(outputDir, "input.nii.gz");
-            await Task.Run(() => ExportVolumeAsNifti(volume, niftiPath), ct);
+            // Publish the volume through a named shared-memory region so the
+            // local plugin sidecar can read it directly without temp files.
+            using SharedRawVolumeHandle sharedVolume = await Task.Run(() => CreateSharedRawVolume(volume), ct);
+            Dictionary<string, string> requestParameters = CreateRawVolumeParameters(volume);
+            requestParameters["kpacs.raw.transport"] = "shm";
+            requestParameters["kpacs.raw.map_name"] = sharedVolume.MapName;
 
             await responseStream.WriteAsync(new ProxySegmentationEvent
             {
                 Progress = new ProxySegProgress
                 {
                     Step = 0, TotalSteps = 4, PercentComplete = 5,
-                    StatusMessage = "Volume exported — starting plugin…",
+                    StatusMessage = "Shared-memory volume published — starting plugin…",
                 },
             }, ct);
 
@@ -151,8 +157,8 @@ public sealed class PluginProxyServiceImpl : PluginProxyService.PluginProxyServi
             {
                 Volume = new VolumeDescriptor
                 {
-                    FilePath = niftiPath,
-                    Format = "nifti",
+                    FilePath = sharedVolume.MapName,
+                    Format = "raw",
                     Dimensions = [volume.SizeX, volume.SizeY, volume.SizeZ],
                     SpacingMm = [volume.SpacingX, volume.SpacingY, volume.SpacingZ],
                     Modality = string.Empty, // server doesn't track modality on the volume
@@ -163,7 +169,10 @@ public sealed class PluginProxyServiceImpl : PluginProxyService.PluginProxyServi
                 Device = string.IsNullOrEmpty(request.Device) ? "gpu" : request.Device,
                 ProduceMultilabel = request.ProduceMultilabel,
                 RoiSubset = request.RoiSubset.Count > 0 ? [.. request.RoiSubset] : null,
-                Parameters = request.Parameters.ToDictionary(kv => kv.Key, kv => kv.Value),
+                Parameters = request.Parameters
+                    .Concat(requestParameters)
+                    .GroupBy(kv => kv.Key, StringComparer.Ordinal)
+                    .ToDictionary(group => group.Key, group => group.Last().Value, StringComparer.Ordinal),
             };
 
             // Start the plugin and run segmentation.
@@ -198,8 +207,23 @@ public sealed class PluginProxyServiceImpl : PluginProxyService.PluginProxyServi
 
             // Convert each structure result into a packed-bit mask and store it
             // for later retrieval by the thin client.
+            int structureIndex = 0;
+            int structureCount = Math.Max(1, result.Structures.Count);
             foreach (SegmentedStructure structure in result.Structures)
             {
+                structureIndex++;
+                int convertPercent = 82 + (structureIndex * 16 / structureCount);
+                await responseStream.WriteAsync(new ProxySegmentationEvent
+                {
+                    Progress = new ProxySegProgress
+                    {
+                        Step = 3,
+                        TotalSteps = 4,
+                        PercentComplete = convertPercent,
+                        StatusMessage = $"Converting mask {structureIndex}/{structureCount}…",
+                    },
+                }, ct);
+
                 string maskToken = Guid.NewGuid().ToString("N");
 
                 // If the plugin produced per-structure NIfTI files, convert them to
@@ -324,130 +348,79 @@ public sealed class PluginProxyServiceImpl : PluginProxyService.PluginProxyServi
         });
     }
 
-    // ── NIfTI conversion helpers ───────────────────────────────
+    // ── Volume / NIfTI helpers ────────────────────────────────
+
+    private static Dictionary<string, string> CreateRawVolumeParameters(SeriesVolume volume)
+    {
+        return new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["kpacs.raw.dtype"] = "int16-le",
+            ["kpacs.raw.origin_lps"] = FormatRawVector(volume.Origin.X, volume.Origin.Y, volume.Origin.Z),
+            ["kpacs.raw.row_lps"] = FormatRawVector(volume.RowDirection.X, volume.RowDirection.Y, volume.RowDirection.Z),
+            ["kpacs.raw.column_lps"] = FormatRawVector(volume.ColumnDirection.X, volume.ColumnDirection.Y, volume.ColumnDirection.Z),
+            ["kpacs.raw.normal_lps"] = FormatRawVector(volume.Normal.X, volume.Normal.Y, volume.Normal.Z),
+        };
+    }
+
+    private static string FormatRawVector(double x, double y, double z) =>
+        string.Join(";",
+            x.ToString("R", CultureInfo.InvariantCulture),
+            y.ToString("R", CultureInfo.InvariantCulture),
+            z.ToString("R", CultureInfo.InvariantCulture));
 
     /// <summary>
-    /// Write a <see cref="SeriesVolume"/> as a minimal NIfTI-1 .nii.gz file
-    /// so that plugins receive a standard neuroimaging input format.
+    /// Publish the volume through a named shared-memory mapping.
+    /// The plugin opens the same mapping by name and wraps it as a NumPy array.
     /// </summary>
-    private static void ExportVolumeAsNifti(SeriesVolume volume, string outputPath)
+    private static SharedRawVolumeHandle CreateSharedRawVolume(SeriesVolume volume)
+    {
+        if (!string.IsNullOrWhiteSpace(volume.SharedRawMapName))
+        {
+            return new SharedRawVolumeHandle(volume.SharedRawMapName, mapping: null);
+        }
+
+        short[] voxelArray = volume.GetVoxelsArrayForInterop();
+        long capacityBytes = checked((long)voxelArray.Length * sizeof(short));
+        string mapName = $@"Local\kpacs-seg-{Guid.NewGuid():N}";
+        MemoryMappedFile mmf = MemoryMappedFile.CreateNew(
+            mapName,
+            capacityBytes,
+            MemoryMappedFileAccess.ReadWrite,
+            MemoryMappedFileOptions.None,
+            HandleInheritability.None);
+
+        using (MemoryMappedViewAccessor accessor = mmf.CreateViewAccessor(0, capacityBytes, MemoryMappedFileAccess.Write))
+        {
+            accessor.WriteArray(0, voxelArray, 0, voxelArray.Length);
+            accessor.Flush();
+        }
+
+        return new SharedRawVolumeHandle(mapName, mmf);
+    }
+
+    /// <summary>
+    /// Write a <see cref="SeriesVolume"/> as a raw little-endian INT16 file.
+    /// The plugin reconstructs the NIfTI image in memory from this payload.
+    /// </summary>
+    private static void ExportVolumeAsRawInt16(SeriesVolume volume, string outputPath)
     {
         using FileStream fs = File.Create(outputPath);
-        using var gz = new System.IO.Compression.GZipStream(fs, System.IO.Compression.CompressionLevel.Fastest);
-        using var bw = new BinaryWriter(gz);
-
-        int nx = volume.SizeX, ny = volume.SizeY, nz = volume.SizeZ;
-
-        // NIfTI-1 header (348 bytes).
-        bw.Write(348);              // sizeof_hdr
-        bw.Write(new byte[28]);     // data_type (10) + db_name (18)
-        bw.Write(0);                // extents
-        bw.Write((short)0);         // session_error
-        bw.Write((byte)'r');        // regular
-        bw.Write((byte)0);          // dim_info
-
-        // dim[0..7]
-        bw.Write((short)3);         // ndim
-        bw.Write((short)nx);
-        bw.Write((short)ny);
-        bw.Write((short)nz);
-        bw.Write((short)1); bw.Write((short)1); bw.Write((short)1); bw.Write((short)1);
-
-        bw.Write(0f); bw.Write(0f); bw.Write(0f); // intent_p1/2/3
-        bw.Write((short)0);         // intent_code
-        bw.Write((short)4);         // datatype = INT16
-        bw.Write((short)16);        // bitpix
-        bw.Write((short)0);         // slice_start
-
-        // pixdim[0..7]
-        bw.Write(1f);               // qfac
-        bw.Write((float)volume.SpacingX);
-        bw.Write((float)volume.SpacingY);
-        bw.Write((float)volume.SpacingZ);
-        bw.Write(0f); bw.Write(0f); bw.Write(0f); bw.Write(0f);
-
-        bw.Write(352f);             // vox_offset
-        bw.Write(1f);               // scl_slope
-        bw.Write(0f);               // scl_inter
-        bw.Write((short)0);         // slice_end
-        bw.Write((byte)0);          // slice_code
-        bw.Write((byte)2);          // xyzt_units = NIFTI_UNITS_MM
-
-        bw.Write(0f); bw.Write(0f); // cal_max, cal_min
-        bw.Write(0f); bw.Write(0f); // slice_duration, toffset
-        bw.Write(0); bw.Write(0);   // glmax, glmin
-        bw.Write(new byte[80]);     // descrip
-        bw.Write(new byte[24]);     // aux_file
-
-        // Use sform (method 2) to encode the full affine.
-        bw.Write((short)0);         // qform_code = 0 (unknown)
-        bw.Write((short)1);         // sform_code = 1 (scanner anat)
-
-        // quatern (unused since qform_code = 0)
-        bw.Write(0f); bw.Write(0f); bw.Write(0f);
-        bw.Write(0f); bw.Write(0f); bw.Write(0f);
-
-        // srow_x, srow_y, srow_z (4 floats each = 48 bytes)
-        //
-        // DICOM uses LPS (Left-Posterior-Superior) patient coordinates;
-        // NIfTI expects RAS (Right-Anterior-Superior).  Convert by
-        // negating the X and Y rows of the affine matrix.
-        SpatialVector3D row = volume.RowDirection;
-        SpatialVector3D col = volume.ColumnDirection;
-        SpatialVector3D nrm = volume.Normal;
-        SpatialVector3D orig = volume.Origin;
-
-        // srow_x  (RAS X = −LPS X)
-        bw.Write((float)(-row.X * volume.SpacingX));
-        bw.Write((float)(-col.X * volume.SpacingY));
-        bw.Write((float)(-nrm.X * volume.SpacingZ));
-        bw.Write((float)(-orig.X));
-        // srow_y  (RAS Y = −LPS Y)
-        bw.Write((float)(-row.Y * volume.SpacingX));
-        bw.Write((float)(-col.Y * volume.SpacingY));
-        bw.Write((float)(-nrm.Y * volume.SpacingZ));
-        bw.Write((float)(-orig.Y));
-        // srow_z  (RAS Z = LPS Z — unchanged)
-        bw.Write((float)(row.Z * volume.SpacingX));
-        bw.Write((float)(col.Z * volume.SpacingY));
-        bw.Write((float)(nrm.Z * volume.SpacingZ));
-        bw.Write((float)orig.Z);
-
-        bw.Write(new byte[16]);     // intent_name
-        // magic: "n+1\0" — written directly (GZipStream does not support Seek).
-        bw.Write((byte)'n'); bw.Write((byte)'+'); bw.Write((byte)'1'); bw.Write((byte)0);
-
-        // 4-byte extension pad.
-        bw.Write(new byte[4]);
-
-        // Voxel data (INT16, x-fastest).
-        // NIfTI uses x-fastest order which matches our volume indexing.
-        for (int z = 0; z < nz; z++)
-        {
-            int sliceBase = z * ny * nx;
-            for (int y = 0; y < ny; y++)
-            {
-                int rowBase = sliceBase + y * nx;
-                for (int x = 0; x < nx; x++)
-                {
-                    bw.Write(volume.Voxels[rowBase + x]);
-                }
-            }
-        }
+        short[] voxels = volume.GetVoxelsArrayForInterop();
+        fs.Write(MemoryMarshal.AsBytes<short>(voxels.AsSpan()));
     }
 
     /// <summary>
     /// Convert a per-structure binary NIfTI mask into a packed-bit array
-    /// aligned to the original volume grid.
+    /// aligned with the original source volume.
     /// </summary>
     private static byte[] ConvertNiftiMaskToPackedBits(string niftiPath, SeriesVolume volume)
     {
         int nx = volume.SizeX, ny = volume.SizeY, nz = volume.SizeZ;
+        short[] maskData = ReadNiftiInt16(niftiPath, nx, ny, nz);
+
         long totalVoxels = (long)nx * ny * nz;
         int byteCount = (int)((totalVoxels + 7) / 8);
         byte[] packed = new byte[byteCount];
-
-        short[] maskData = ReadNiftiInt16(niftiPath, nx, ny, nz);
 
         for (int i = 0; i < totalVoxels && i < maskData.Length; i++)
         {
@@ -606,6 +579,24 @@ public sealed class PluginProxyServiceImpl : PluginProxyService.PluginProxyServi
     };
 
     // ── Mask data entry ────────────────────────────────────────
+
+    private sealed class SharedRawVolumeHandle : IDisposable
+    {
+        private readonly MemoryMappedFile? _mapping;
+
+        public SharedRawVolumeHandle(string mapName, MemoryMappedFile? mapping)
+        {
+            MapName = mapName;
+            _mapping = mapping;
+        }
+
+        public string MapName { get; }
+
+        public void Dispose()
+        {
+            _mapping?.Dispose();
+        }
+    }
 
     private sealed record MaskDataEntry(
         byte[] PackedBits,

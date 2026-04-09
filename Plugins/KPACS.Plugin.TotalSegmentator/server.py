@@ -143,12 +143,16 @@ class TotalSegmentatorServicer(pb2_grpc.PluginServiceServicer):
 
         task_id = request.task_id
         volume_path = request.volume.file_path
+        volume_format = request.volume.format or "nifti"
+        dimensions = list(request.volume.dimensions) or None
+        spacing_mm = list(request.volume.spacing_mm) or None
         output_dir = request.output_directory
         device = request.device or "gpu"
         multilabel = request.produce_multilabel
         roi_subset = list(request.roi_subset) or None
+        parameters = dict(request.parameters)
 
-        total_steps = 4
+        total_steps = 5
 
         # ── Step 0: Preparing ────────────────────────────────────
         yield pb2.SegmentationEvent(
@@ -163,18 +167,36 @@ class TotalSegmentatorServicer(pb2_grpc.PluginServiceServicer):
         start_time = time.monotonic()
 
         try:
-            # ── Step 1: Inference ────────────────────────────────
+            # ── Step 1: Input preparation ───────────────────────
             yield pb2.SegmentationEvent(
                 progress=pb2.SegProgressUpdate(
                     step=1,
                     total_steps=total_steps,
                     percent_complete=10,
+                    status_message="Preparing input volume…",
+                )
+            )
+
+            prepared_input = self._bridge.prepare_input(
+                input_path=volume_path,
+                input_format=volume_format,
+                dimensions=dimensions,
+                spacing_mm=spacing_mm,
+                parameters=parameters,
+            )
+
+            # ── Step 2: Inference ────────────────────────────────
+            yield pb2.SegmentationEvent(
+                progress=pb2.SegProgressUpdate(
+                    step=2,
+                    total_steps=total_steps,
+                    percent_complete=20,
                     status_message=f"Running '{task_id}' segmentation on {device}…",
                 )
             )
 
             result = self._bridge.run_segmentation(
-                input_path=volume_path,
+                input_source=prepared_input,
                 output_dir=output_dir,
                 task=task_id,
                 device=device,
@@ -182,12 +204,12 @@ class TotalSegmentatorServicer(pb2_grpc.PluginServiceServicer):
                 roi_subset=roi_subset,
             )
 
-            # ── Step 2: Parsing ──────────────────────────────────
+            # ── Step 3: Parsing ──────────────────────────────────
             yield pb2.SegmentationEvent(
                 progress=pb2.SegProgressUpdate(
-                    step=2,
+                    step=3,
                     total_steps=total_steps,
-                    percent_complete=70,
+                    percent_complete=75,
                     status_message="Analyzing segmentation output…",
                 )
             )
@@ -198,12 +220,12 @@ class TotalSegmentatorServicer(pb2_grpc.PluginServiceServicer):
                 multilabel_path=result.get("multilabel_path"),
             )
 
-            # ── Step 3: Streaming structures ─────────────────────
+            # ── Step 4: Streaming structures ─────────────────────
             yield pb2.SegmentationEvent(
                 progress=pb2.SegProgressUpdate(
-                    step=3,
+                    step=4,
                     total_steps=total_steps,
-                    percent_complete=85,
+                    percent_complete=88,
                     status_message=f"Streaming {len(structures)} structure(s)…",
                 )
             )
@@ -227,6 +249,15 @@ class TotalSegmentatorServicer(pb2_grpc.PluginServiceServicer):
 
             # ── Complete ─────────────────────────────────────────
             elapsed = time.monotonic() - start_time
+
+            yield pb2.SegmentationEvent(
+                progress=pb2.SegProgressUpdate(
+                    step=5,
+                    total_steps=total_steps,
+                    percent_complete=99,
+                    status_message="Finalizing segmentation…",
+                )
+            )
 
             yield pb2.SegmentationEvent(
                 complete=pb2.SegComplete(
