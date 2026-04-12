@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using KPACS.Viewer.Models;
 
 namespace KPACS.Viewer.Rendering;
@@ -5,6 +6,45 @@ namespace KPACS.Viewer.Rendering;
 internal static class CenterlineFrameBuilder
 {
     private const double DefaultReferenceDotThreshold = 0.92;
+
+    // ── Cached frames list ───────────────────────────────────────
+    // BuildFrames is expensive (cross products, normalizations, rotations per point).
+    // GetFrame previously rebuilt the entire list on every call, causing O(n²) cost
+    // when scrubbing along the centerline.  We now cache the result keyed by
+    // (volume, path, rotation) and index directly into the list in O(1).
+    private static readonly ConditionalWeakTable<CenterlinePath, CachedFrameList> s_frameCache = new();
+
+    private sealed class CachedFrameList
+    {
+        public SeriesVolume? Volume;
+        public double AxialRotationRadians;
+        public IReadOnlyList<CenterlineSampleFrame>? Frames;
+    }
+
+    /// <summary>
+    /// Returns the cached frame list for the given path, rebuilding only when the
+    /// volume or rotation have changed.
+    /// </summary>
+    private static IReadOnlyList<CenterlineSampleFrame> GetOrBuildFrames(
+        SeriesVolume volume,
+        CenterlinePath path,
+        double axialRotationRadians)
+    {
+        CachedFrameList entry = s_frameCache.GetOrCreateValue(path);
+
+        if (entry.Frames is not null
+            && ReferenceEquals(entry.Volume, volume)
+            && Math.Abs(entry.AxialRotationRadians - axialRotationRadians) <= 1e-9)
+        {
+            return entry.Frames;
+        }
+
+        IReadOnlyList<CenterlineSampleFrame> frames = BuildFrames(volume, path, axialRotationRadians);
+        entry.Volume = volume;
+        entry.AxialRotationRadians = axialRotationRadians;
+        entry.Frames = frames;
+        return frames;
+    }
 
     public static IReadOnlyList<CenterlineSampleFrame> BuildFrames(
         SeriesVolume volume,
@@ -88,14 +128,9 @@ internal static class CenterlineFrameBuilder
             return new CenterlineSampleFrame(new Vector3D(0, 0, 0), new Vector3D(0, 0, 1), new Vector3D(0, 1, 0), new Vector3D(1, 0, 0));
         }
 
-        int clampedIndex = Math.Clamp(index, 0, path.Points.Count - 1);
-        CenterlineSampleFrame frame = default;
-        foreach (CenterlineSampleFrame current in BuildFrames(volume, path, axialRotationRadians).Take(clampedIndex + 1))
-        {
-            frame = current;
-        }
-
-        return frame;
+        IReadOnlyList<CenterlineSampleFrame> frames = GetOrBuildFrames(volume, path, axialRotationRadians);
+        int clampedIndex = Math.Clamp(index, 0, frames.Count - 1);
+        return frames[clampedIndex];
     }
 
     private static Vector3D GetTangent(CenterlinePath path, int index)

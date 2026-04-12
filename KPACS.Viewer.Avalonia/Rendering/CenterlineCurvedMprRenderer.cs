@@ -34,6 +34,17 @@ internal static class CenterlineCurvedMprRenderer
         IReadOnlyList<CenterlineSampleFrame> frames = CenterlineFrameBuilder.BuildFrames(volume, path, axialRotationRadians);
         int slabSampleCount = slab > 0.25 ? Math.Max(3, (int)Math.Ceiling(slab / Math.Max(0.5, Math.Min(volume.SpacingX, volume.SpacingY)))) : 1;
 
+        // Ensure the higher-Z (superior in LPS) end of the path is rendered
+        // as station 0 so it appears at the top of the vertical display or the
+        // left of the horizontal display. If the path runs from inferior to
+        // superior, reverse the frame order.
+        bool stationReversed = path.Points.Count >= 2
+            && path.Points[0].PatientPoint.Z < path.Points[^1].PatientPoint.Z;
+        if (stationReversed)
+        {
+            frames = frames.Reverse().ToList();
+        }
+
         // --- GPU path: pack frames into a flat float buffer and dispatch to OpenCL ---
         short[] pixels = TryRenderOnGpu(volume, frames, width, height, pixelSpacingMm, slabSampleCount, slab);
         string backendLabel;
@@ -75,8 +86,8 @@ internal static class CenterlineCurvedMprRenderer
         }
 
         return orientation == CurvedMprDisplayOrientation.Vertical
-            ? RotateVertical(width, height, pixelSpacingMm, pixels, backendLabel)
-            : new CurvedMprRenderResult(width, height, pixelSpacingMm, pixels, centerRows, orientation, backendLabel);
+            ? RotateVertical(width, height, pixelSpacingMm, pixels, backendLabel, stationReversed)
+            : new CurvedMprRenderResult(width, height, pixelSpacingMm, pixels, centerRows, orientation, backendLabel, stationReversed);
     }
 
     /// <summary>
@@ -150,7 +161,7 @@ internal static class CenterlineCurvedMprRenderer
             : CurvedMprDisplayOrientation.Horizontal;
     }
 
-    private static CurvedMprRenderResult RotateVertical(int width, int height, double pixelSpacingMm, short[] pixels, string backendLabel)
+    private static CurvedMprRenderResult RotateVertical(int width, int height, double pixelSpacingMm, short[] pixels, string backendLabel, bool stationReversed)
     {
         short[] rotated = new short[width * height];
         for (int y = 0; y < height; y++)
@@ -164,7 +175,7 @@ internal static class CenterlineCurvedMprRenderer
         }
 
         int[] centerRows = Enumerable.Repeat(height / 2, width).ToArray();
-        return new CurvedMprRenderResult(height, width, pixelSpacingMm, rotated, centerRows, CurvedMprDisplayOrientation.Vertical, backendLabel);
+        return new CurvedMprRenderResult(height, width, pixelSpacingMm, rotated, centerRows, CurvedMprDisplayOrientation.Vertical, backendLabel, stationReversed);
     }
 
     private static double SampleSlab(SeriesVolume volume, Vector3D sampleCenter, Vector3D slabDirection, double slabThicknessMm, int sampleCount)
@@ -213,7 +224,7 @@ internal sealed class CurvedMprRenderResult
 {
     public static CurvedMprRenderResult Empty { get; } = new(1, 1, 1.0, [0], [0], CurvedMprDisplayOrientation.Horizontal, "CPU");
 
-    public CurvedMprRenderResult(int width, int height, double pixelSpacingMm, short[] pixels, int[] centerRows, CurvedMprDisplayOrientation orientation, string renderBackendLabel = "CPU")
+    public CurvedMprRenderResult(int width, int height, double pixelSpacingMm, short[] pixels, int[] centerRows, CurvedMprDisplayOrientation orientation, string renderBackendLabel = "CPU", bool isStationReversed = false)
     {
         Width = width;
         Height = height;
@@ -222,6 +233,7 @@ internal sealed class CurvedMprRenderResult
         CenterRows = centerRows;
         Orientation = orientation;
         RenderBackendLabel = renderBackendLabel;
+        IsStationReversed = isStationReversed;
     }
 
     public int Width { get; }
@@ -237,6 +249,13 @@ internal sealed class CurvedMprRenderResult
     public CurvedMprDisplayOrientation Orientation { get; }
 
     public string RenderBackendLabel { get; }
+
+    /// <summary>
+    /// True when the station axis was reversed during rendering so that
+    /// the higher-Z (superior) end of the path appears at the visual top.
+    /// UI code must invert station-index ↔ position mappings when set.
+    /// </summary>
+    public bool IsStationReversed { get; }
 }
 
 internal enum CurvedMprDisplayOrientation

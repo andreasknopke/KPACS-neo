@@ -161,20 +161,71 @@ public static class VolumeReslicer
         };
     }
 
-    // Single-entry cache for the most recent orthogonal slice extraction.
-    // During linked-view sync in large grids (e.g. 4×4), many panels
-    // request the same volume/orientation/slice in rapid succession.
-    // Caching the last result avoids redundant reslice + GPU round-trips.
-    // The pixel arrays in ReslicedImage are treated as read-only by the
-    // rendering pipeline, so sharing a single instance is safe.
+    // LRU cache for orthogonal slice extraction, per-thread.
+    // Multi-panel views (e.g. axial + coronal + sagittal + cross-section) request
+    // different volume/orientation/slice combinations in rapid succession.
+    // A single-entry cache thrashes constantly in this scenario, while an LRU
+    // with a small capacity (8 entries) covers the typical panel count and avoids
+    // redundant reslice + GPU round-trips. The pixel arrays in ReslicedImage are
+    // treated as read-only by the rendering pipeline, so sharing instances is safe.
+    private const int SliceCacheCapacity = 8;
+
     [ThreadStatic]
-    private static SeriesVolume? t_cachedSliceVolume;
-    [ThreadStatic]
-    private static SliceOrientation t_cachedSliceOrientation;
-    [ThreadStatic]
-    private static int t_cachedSliceIndex;
-    [ThreadStatic]
-    private static ReslicedImage? t_cachedSliceResult;
+    private static SliceLruCache? t_sliceCache;
+
+    /// <summary>
+    /// Compact LRU cache keyed by (volume-identity, orientation, sliceIndex).
+    /// Entries are evicted oldest-first when capacity is exceeded.
+    /// WeakReference keeps the volume from being pinned in memory.
+    /// </summary>
+    private sealed class SliceLruCache
+    {
+        private readonly int _capacity;
+        private readonly LinkedList<SliceCacheEntry> _entries = new();
+
+        public SliceLruCache(int capacity) => _capacity = capacity;
+
+        public ReslicedImage? TryGet(SeriesVolume volume, SliceOrientation orientation, int sliceIndex)
+        {
+            for (var node = _entries.First; node is not null; node = node.Next)
+            {
+                SliceCacheEntry e = node.Value;
+                if (e.Orientation == orientation
+                    && e.SliceIndex == sliceIndex
+                    && e.VolumeRef.TryGetTarget(out SeriesVolume? cached)
+                    && ReferenceEquals(cached, volume))
+                {
+                    // Move to front (most-recently-used).
+                    _entries.Remove(node);
+                    _entries.AddFirst(node);
+                    return e.Result;
+                }
+            }
+
+            return null;
+        }
+
+        public void Add(SeriesVolume volume, SliceOrientation orientation, int sliceIndex, ReslicedImage result)
+        {
+            // Evict oldest if at capacity.
+            while (_entries.Count >= _capacity)
+            {
+                _entries.RemoveLast();
+            }
+
+            _entries.AddFirst(new SliceCacheEntry(
+                new WeakReference<SeriesVolume>(volume),
+                orientation,
+                sliceIndex,
+                result));
+        }
+    }
+
+    private sealed record SliceCacheEntry(
+        WeakReference<SeriesVolume> VolumeRef,
+        SliceOrientation Orientation,
+        int SliceIndex,
+        ReslicedImage Result);
 
     /// <summary>
     /// Extracts an orthogonal slice from the volume.
@@ -185,12 +236,12 @@ public static class VolumeReslicer
     /// <returns>Resliced 2D image.</returns>
     public static ReslicedImage ExtractSlice(SeriesVolume volume, SliceOrientation orientation, int sliceIndex)
     {
-        if (t_cachedSliceResult is not null
-            && ReferenceEquals(t_cachedSliceVolume, volume)
-            && t_cachedSliceOrientation == orientation
-            && t_cachedSliceIndex == sliceIndex)
+        t_sliceCache ??= new SliceLruCache(SliceCacheCapacity);
+
+        ReslicedImage? cached = t_sliceCache.TryGet(volume, orientation, sliceIndex);
+        if (cached is not null)
         {
-            return t_cachedSliceResult;
+            return cached;
         }
 
         ReslicedImage result = orientation switch
@@ -201,10 +252,7 @@ public static class VolumeReslicer
             _ => ExtractAxial(volume, sliceIndex),
         };
 
-        t_cachedSliceVolume = volume;
-        t_cachedSliceOrientation = orientation;
-        t_cachedSliceIndex = sliceIndex;
-        t_cachedSliceResult = result;
+        t_sliceCache.Add(volume, orientation, sliceIndex, result);
         return result;
     }
 

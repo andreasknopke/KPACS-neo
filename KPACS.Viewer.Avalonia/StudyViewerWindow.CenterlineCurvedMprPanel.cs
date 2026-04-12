@@ -34,6 +34,7 @@ public partial class StudyViewerWindow
     private Guid? _centerlineCurvedMprRenderedPathId;
     private double _centerlineCurvedMprRenderedRotationDegrees = double.NaN;
     private CurvedMprDisplayOrientation _centerlineCurvedMprDisplayOrientation = CurvedMprDisplayOrientation.Horizontal;
+    private bool _centerlineCurvedMprStationReversed;
     private const double CenterlineCurvedMprHorizontalDisplayWidth = 620;
     private const double CenterlineCurvedMprHorizontalDisplayHeight = 240;
     private const double CenterlineCurvedMprVerticalDisplayWidth = 240;
@@ -166,6 +167,7 @@ public partial class StudyViewerWindow
 
             RenderCenterlineCurvedMprBitmap(renderResult);
             _centerlineCurvedMprDisplayOrientation = renderResult.Orientation;
+            _centerlineCurvedMprStationReversed = renderResult.IsStationReversed;
             ApplyCenterlineCurvedMprDisplayOrientation(_centerlineCurvedMprDisplayOrientation);
             _centerlineCurvedMprRenderedPathId = path.Id;
             _centerlineCurvedMprRenderedRotationDegrees = rotationDegrees;
@@ -266,12 +268,16 @@ public partial class StudyViewerWindow
 
         if (_centerlineCurvedMprDisplayOrientation == CurvedMprDisplayOrientation.Vertical)
         {
-            double y = (stationIndex / (double)(path.Points.Count - 1)) * Math.Max(0, hostHeight - 2);
+            double t = stationIndex / (double)(path.Points.Count - 1);
+            if (_centerlineCurvedMprStationReversed) t = 1.0 - t;
+            double y = t * Math.Max(0, hostHeight - 2);
             CenterlineCurvedMprStationIndicator.Margin = new Thickness(0, Math.Clamp(y, 0, Math.Max(0, hostHeight - 2)), 0, 0);
             return;
         }
 
-        double x = (stationIndex / (double)(path.Points.Count - 1)) * Math.Max(0, hostWidth - 2);
+        double tH = stationIndex / (double)(path.Points.Count - 1);
+        if (_centerlineCurvedMprStationReversed) tH = 1.0 - tH;
+        double x = tH * Math.Max(0, hostWidth - 2);
         CenterlineCurvedMprStationIndicator.Margin = new Thickness(Math.Clamp(x, 0, Math.Max(0, hostWidth - 2)), 0, 0, 0);
     }
 
@@ -392,12 +398,14 @@ public partial class StudyViewerWindow
         if (_centerlineCurvedMprDisplayOrientation == CurvedMprDisplayOrientation.Vertical)
         {
             double height = Math.Max(1, CenterlineCurvedMprImageHost.Bounds.Height);
-            _centerlineCrossSectionStationNormalized = Math.Clamp(position.Y / height, 0, 1);
+            double t = Math.Clamp(position.Y / height, 0, 1);
+            _centerlineCrossSectionStationNormalized = _centerlineCurvedMprStationReversed ? 1.0 - t : t;
         }
         else
         {
             double width = Math.Max(1, CenterlineCurvedMprImageHost.Bounds.Width);
-            _centerlineCrossSectionStationNormalized = Math.Clamp(position.X / width, 0, 1);
+            double t = Math.Clamp(position.X / width, 0, 1);
+            _centerlineCrossSectionStationNormalized = _centerlineCurvedMprStationReversed ? 1.0 - t : t;
         }
 
         RefreshCenterlinePanels();

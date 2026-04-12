@@ -189,7 +189,7 @@ public static class VolumeComputeBackend
     {
         if (Preference == VolumeComputePreference.CpuOnly)
         {
-            Console.Error.WriteLine($"[GPU·Projection] SKIPPED — preference is CpuOnly");
+            Console.Error.WriteLine($"[GPUÂ·Projection] SKIPPED â€” preference is CpuOnly");
             image = new ReslicedImage();
             return false;
         }
@@ -197,14 +197,14 @@ public static class VolumeComputeBackend
         OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
         if (renderer is null)
         {
-            Console.Error.WriteLine($"[GPU·Projection] SKIPPED — renderer is null");
+            Console.Error.WriteLine($"[GPUÂ·Projection] SKIPPED â€” renderer is null");
             image = new ReslicedImage();
             return false;
         }
 
         bool success = renderer.TryRenderProjection(volume, orientation, startSlice, endSlice, reference, mode, out image);
         if (!success)
-            Console.Error.WriteLine($"[GPU·Projection] FAILED mode={mode} size={reference.Width}×{reference.Height} slices={startSlice}–{endSlice}");
+            Console.Error.WriteLine($"[GPUÂ·Projection] FAILED mode={mode} size={reference.Width}Ã—{reference.Height} slices={startSlice}â€“{endSlice}");
         return success;
     }
 
@@ -216,7 +216,7 @@ public static class VolumeComputeBackend
     {
         if (Preference == VolumeComputePreference.CpuOnly)
         {
-            Console.Error.WriteLine($"[GPU·DVR] SKIPPED — preference is CpuOnly");
+            Console.Error.WriteLine($"[GPUÂ·DVR] SKIPPED â€” preference is CpuOnly");
             image = new ReslicedImage();
             return false;
         }
@@ -224,14 +224,14 @@ public static class VolumeComputeBackend
         OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
         if (renderer is null)
         {
-            Console.Error.WriteLine($"[GPU·DVR] SKIPPED — renderer is null");
+            Console.Error.WriteLine($"[GPUÂ·DVR] SKIPPED â€” renderer is null");
             image = new ReslicedImage();
             return false;
         }
 
         bool success = renderer.TryRenderDvrView(volume, state, transferFunction, out image);
         if (!success)
-            Console.Error.WriteLine($"[GPU·DVR] FAILED size={state.OutputWidth}×{state.OutputHeight}");
+            Console.Error.WriteLine($"[GPUÂ·DVR] FAILED size={state.OutputWidth}Ã—{state.OutputHeight}");
         return success;
     }
 
@@ -244,7 +244,7 @@ public static class VolumeComputeBackend
     {
         if (Preference == VolumeComputePreference.CpuOnly)
         {
-            Console.Error.WriteLine($"[GPU·Oblique] SKIPPED — preference is CpuOnly");
+            Console.Error.WriteLine($"[GPUÂ·Oblique] SKIPPED â€” preference is CpuOnly");
             image = new ReslicedImage();
             return false;
         }
@@ -252,14 +252,14 @@ public static class VolumeComputeBackend
         OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
         if (renderer is null)
         {
-            Console.Error.WriteLine($"[GPU·Oblique] SKIPPED — renderer is null");
+            Console.Error.WriteLine($"[GPUÂ·Oblique] SKIPPED â€” renderer is null");
             image = new ReslicedImage();
             return false;
         }
 
         bool success = renderer.TryRenderObliqueProjection(volume, plane, thicknessMm, mode, out image);
         if (!success)
-            Console.Error.WriteLine($"[GPU·Oblique] FAILED mode={mode} size={plane.Width}×{plane.Height} slab={thicknessMm:0.0}mm");
+            Console.Error.WriteLine($"[GPUÂ·Oblique] FAILED mode={mode} size={plane.Width}Ã—{plane.Height} slab={thicknessMm:0.0}mm");
         return success;
     }
 
@@ -281,20 +281,20 @@ public static class VolumeComputeBackend
         pixels = [];
         if (Preference == VolumeComputePreference.CpuOnly)
         {
-            Console.Error.WriteLine($"[GPU·CurvedMPR] SKIPPED — preference is CpuOnly");
+            Console.Error.WriteLine($"[GPUÂ·CurvedMPR] SKIPPED â€” preference is CpuOnly");
             return false;
         }
 
         OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
         if (renderer is null)
         {
-            Console.Error.WriteLine($"[GPU·CurvedMPR] SKIPPED — renderer is null");
+            Console.Error.WriteLine($"[GPUÂ·CurvedMPR] SKIPPED â€” renderer is null");
             return false;
         }
 
         bool success = renderer.TryRenderCurvedMpr(volume, frameData, pathPointCount, imageHeight, pixelSpacingMm, slabSampleCount, slabThicknessMm, out pixels);
         if (!success)
-            Console.Error.WriteLine($"[GPU·CurvedMPR] FAILED stations={pathPointCount} height={imageHeight} slab={slabThicknessMm:0.0}mm");
+            Console.Error.WriteLine($"[GPUÂ·CurvedMPR] FAILED stations={pathPointCount} height={imageHeight} slab={slabThicknessMm:0.0}mm");
         return success;
     }
 
@@ -307,20 +307,20 @@ public static class VolumeComputeBackend
         gradients = [];
         if (Preference == VolumeComputePreference.CpuOnly)
         {
-            Console.Error.WriteLine($"[GPU·Gradient] SKIPPED — preference is CpuOnly");
+            Console.Error.WriteLine($"[GPUÂ·Gradient] SKIPPED â€” preference is CpuOnly");
             return false;
         }
 
         OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
         if (renderer is null)
         {
-            Console.Error.WriteLine($"[GPU·Gradient] SKIPPED — renderer is null");
+            Console.Error.WriteLine($"[GPUÂ·Gradient] SKIPPED â€” renderer is null");
             return false;
         }
 
         bool success = renderer.TryComputeGradientVolume(volume, out gradients);
         if (!success)
-            Console.Error.WriteLine($"[GPU·Gradient] FAILED volume={volume.SizeX}×{volume.SizeY}×{volume.SizeZ}");
+            Console.Error.WriteLine($"[GPUÂ·Gradient] FAILED volume={volume.SizeX}Ã—{volume.SizeY}Ã—{volume.SizeZ}");
         return success;
     }
 
@@ -340,20 +340,20 @@ public static class VolumeComputeBackend
         pixels = [];
         if (Preference == VolumeComputePreference.CpuOnly)
         {
-            Console.Error.WriteLine($"[GPU·CrossSection] SKIPPED — preference is CpuOnly");
+            Console.Error.WriteLine($"[GPUÂ·CrossSection] SKIPPED â€” preference is CpuOnly");
             return false;
         }
 
         OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
         if (renderer is null)
         {
-            Console.Error.WriteLine($"[GPU·CrossSection] SKIPPED — renderer is null");
+            Console.Error.WriteLine($"[GPUÂ·CrossSection] SKIPPED â€” renderer is null");
             return false;
         }
 
         bool success = renderer.TryRenderCrossSection(volume, center, rowDir, colDir, fieldOfViewMm, outputSize, out pixels);
         if (!success)
-            Console.Error.WriteLine($"[GPU·CrossSection] FAILED size={outputSize} fov={fieldOfViewMm:0.0}mm");
+            Console.Error.WriteLine($"[GPUÂ·CrossSection] FAILED size={outputSize} fov={fieldOfViewMm:0.0}mm");
         return success;
     }
 
@@ -395,7 +395,7 @@ public static class VolumeComputeBackend
             maxRadiusX, maxRadiusY, maxRadiusZ,
             maxVoxels, out region, out iterationCount);
         if (!success)
-            Console.Error.WriteLine($"[GPU·SegmentRegion] FAILED seed=({seedX},{seedY},{seedZ}) tol={tolerance:0.0}");
+            Console.Error.WriteLine($"[GPUÂ·SegmentRegion] FAILED seed=({seedX},{seedY},{seedZ}) tol={tolerance:0.0}");
         return success;
     }
 
@@ -422,7 +422,7 @@ public static class VolumeComputeBackend
             OpenClVolumeRenderer? renderer = OpenClVolumeRenderer.TryCreate(out string detail);
             if (renderer is not null)
             {
-                string msg = $"[VolumeComputeBackend] OpenCL initialized: {renderer.Status.DeviceName} — {renderer.Status.Detail}";
+                string msg = $"[VolumeComputeBackend] OpenCL initialized: {renderer.Status.DeviceName} â€” {renderer.Status.Detail}";
                 Trace.TraceInformation(msg);
                 Console.Error.WriteLine(msg);
                 return new RuntimeState(renderer, renderer.Status);
@@ -1050,7 +1050,7 @@ __kernel void RenderDvr(
 }
 
 // ===========================================================================================
-// Oblique slab projection kernel — arbitrary plane orientation with trilinear interpolation.
+// Oblique slab projection kernel â€” arbitrary plane orientation with trilinear interpolation.
 // Supports MPR (avg=0), MIP (max=1), MinIP (min=2), MpVrt (compositing=3).
 //
 // The plane is defined in patient space by center, row, column, and normal vectors.
@@ -1189,7 +1189,7 @@ __kernel void RenderObliqueSlab(
 }
 
 // ===========================================================================================
-// Curved MPR kernel — renders a straightened MPR along a centerline path.
+// Curved MPR kernel â€” renders a straightened MPR along a centerline path.
 // Each work-item produces one pixel at (pathIndex, rowIndex).
 // frameData layout per station (12 floats):
 //   [0..2]  patientPoint (x, y, z)
@@ -1269,7 +1269,7 @@ __kernel void RenderCurvedMpr(
 }
 
 // ===========================================================================================
-// Gradient volume kernel — computes central-difference gradient for every voxel.
+// Gradient volume kernel â€” computes central-difference gradient for every voxel.
 // Output: float buffer with 3 components per voxel (gx, gy, gz) in row-major order.
 // ===========================================================================================
 __kernel void ComputeGradientVolume(
@@ -1301,9 +1301,9 @@ __kernel void ComputeGradientVolume(
 }
 
 // ===========================================================================================
-// Cross-section kernel — renders a single perpendicular slice at a centerline station.
+// Cross-section kernel â€” renders a single perpendicular slice at a centerline station.
 // Plane defined by center, row direction, column direction, field-of-view, output size.
-// Single-slice (no slab) for speed — used for the cross-section navigator.
+// Single-slice (no slab) for speed â€” used for the cross-section navigator.
 // ===========================================================================================
 __kernel void RenderCrossSection(
     __global const short* volume,
@@ -1345,7 +1345,7 @@ __kernel void RenderCrossSection(
     output[row * outputSize + col] = valid != 0 ? (short)clamp((int)round(val), -32768, 32767) : (short)0;
 }
 
-// ── GPU-accelerated region growing ──────────────────────────────────────────
+// â”€â”€ GPU-accelerated region growing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Kernel 1: Compute a robust homogenised value (median + MAD filter) for every
 //           voxel inside the supplied bounding box.  Runs once before the
 //           iterative flood fill.
@@ -1483,7 +1483,11 @@ __kernel void FloodFillStep(
 }
 ";
 
-    private readonly object _sync = new();
+    // SemaphoreSlim(1,1) instead of a plain object lock.
+    // This lets background render threads (cross-section, curved MPR) use WaitAsync()
+    // instead of blocking the thread pool thread during contention, and enables
+    // cancellation-aware acquisition via the WaitAsync(CancellationToken) overload.
+    private readonly SemaphoreSlim _sync = new(1, 1);
     private readonly OpenClContext _context;
     private readonly OpenClCommandQueue _queue;
     private readonly OpenClProgram _program;
@@ -1759,8 +1763,7 @@ __kernel void FloodFillStep(
             return false;
         }
 
-        lock (_sync)
-        {
+        _sync.Wait();
             try
             {
                 EnsureVolumeBuffer(volume);
@@ -1811,7 +1814,10 @@ __kernel void FloodFillStep(
                 image = new ReslicedImage();
                 return false;
             }
-        }
+            finally
+            {
+                _sync.Release();
+            }
     }
 
     public bool TryRenderObliqueProjection(
@@ -1827,8 +1833,7 @@ __kernel void FloodFillStep(
             return false;
         }
 
-        lock (_sync)
-        {
+        _sync.Wait();
             try
             {
                 EnsureVolumeBuffer(volume);
@@ -1937,7 +1942,10 @@ __kernel void FloodFillStep(
                 image = new ReslicedImage();
                 return false;
             }
-        }
+            finally
+            {
+                _sync.Release();
+            }
     }
 
     public bool TryRenderDvrView(
@@ -1948,8 +1956,7 @@ __kernel void FloodFillStep(
     {
         image = new ReslicedImage();
 
-        lock (_sync)
-        {
+        _sync.Wait();
             try
             {
                 EnsureVolumeBuffer(volume);
@@ -2051,7 +2058,10 @@ __kernel void FloodFillStep(
                 image = new ReslicedImage();
                 return false;
             }
-        }
+            finally
+            {
+                _sync.Release();
+            }
     }
 
     public bool TryRenderCurvedMpr(
@@ -2065,8 +2075,7 @@ __kernel void FloodFillStep(
         out short[] pixels)
     {
         pixels = [];
-        lock (_sync)
-        {
+        _sync.Wait();
             try
             {
                 EnsureVolumeBuffer(volume);
@@ -2078,9 +2087,10 @@ __kernel void FloodFillStep(
 
                 int frameFloatCount = pathPointCount * 12;
                 IMem<float> frameBuffer = EnsureCurvedMprFrameBuffer(frameFloatCount);
-                // Upload frame data
+                // Upload frame data â€” non-blocking; the in-order queue guarantees
+                // the write completes before any subsequent kernel dispatch.
                 float[] frameArray = frameData.ToArray();
-                ErrorCode writeErr = Cl.EnqueueWriteBuffer(_queue, frameBuffer, Bool.True, frameArray, 0, null!, out _);
+                ErrorCode writeErr = Cl.EnqueueWriteBuffer(_queue, frameBuffer, Bool.False, frameArray, 0, null!, out _);
                 ThrowOnError(writeErr, "Failed to upload curved MPR frame data.");
 
                 int outputLength = pathPointCount * imageHeight;
@@ -2133,14 +2143,16 @@ __kernel void FloodFillStep(
                 pixels = [];
                 return false;
             }
-        }
+            finally
+            {
+                _sync.Release();
+            }
     }
 
     public bool TryComputeGradientVolume(SeriesVolume volume, out float[] gradients)
     {
         gradients = [];
-        lock (_sync)
-        {
+        _sync.Wait();
             try
             {
                 EnsureVolumeBuffer(volume);
@@ -2181,7 +2193,10 @@ __kernel void FloodFillStep(
                 gradients = [];
                 return false;
             }
-        }
+            finally
+            {
+                _sync.Release();
+            }
     }
 
     public bool TryRenderCrossSection(
@@ -2194,8 +2209,7 @@ __kernel void FloodFillStep(
         out short[] pixels)
     {
         pixels = [];
-        lock (_sync)
-        {
+        _sync.Wait();
             try
             {
                 EnsureVolumeBuffer(volume);
@@ -2263,7 +2277,10 @@ __kernel void FloodFillStep(
                 pixels = [];
                 return false;
             }
-        }
+            finally
+            {
+                _sync.Release();
+            }
     }
 
     /// <summary>
@@ -2287,8 +2304,7 @@ __kernel void FloodFillStep(
         iterationCount = 0;
         const int maxIterations = 500;
 
-        lock (_sync)
-        {
+        _sync.Wait();
             try
             {
                 EnsureVolumeBuffer(volume);
@@ -2316,7 +2332,7 @@ __kernel void FloodFillStep(
                     return false;
                 }
 
-                // ── Step 1: Homogenise the sub-volume on GPU ─────────────────
+                // â”€â”€ Step 1: Homogenise the sub-volume on GPU â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 IMem<float> homogenizeBuffer = EnsureHomogenizeOutputBuffer(boxVoxelCount);
 
                 uint a = 0;
@@ -2333,10 +2349,10 @@ __kernel void FloodFillStep(
                 SetKernelArgValue(_homogenizeKernel, a++, boxSizeZ);
 
                 Execute3D(_homogenizeKernel, boxSizeX, boxSizeY, boxSizeZ);
-                // No read-back needed — stays on GPU for flood fill.
+                // No read-back needed â€” stays on GPU for flood fill.
                 // Blocking synchronisation happens via the in-order queue.
 
-                // ── Step 2: Initialise the flood-fill mask ───────────────────
+                // â”€â”€ Step 2: Initialise the flood-fill mask â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 int[] maskHost = new int[boxVoxelCount]; // 0 = unvisited
                 int seedLocalX = seedX - boxMinX;
                 int seedLocalY = seedY - boxMinY;
@@ -2349,7 +2365,7 @@ __kernel void FloodFillStep(
 
                 IMem<int> changedBuffer = EnsureFloodFillChangedBuffer();
 
-                // ── Step 3: Iterative flood fill ─────────────────────────────
+                // â”€â”€ Step 3: Iterative flood fill â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
                 for (int iteration = 0; iteration < maxIterations; iteration++)
                 {
                     // Reset changed counter to 0.
@@ -2376,7 +2392,7 @@ __kernel void FloodFillStep(
                     }
                 }
 
-                // ── Step 4: Read mask back and convert to voxel-key set ──────
+                // â”€â”€ Step 4: Read mask back and convert to voxel-key set â”€â”€â”€â”€â”€â”€
                 int[] resultMask = ReadBuffer(maskBuffer, boxVoxelCount);
                 UpdateKernelProfilingTime();
 
@@ -2417,7 +2433,10 @@ __kernel void FloodFillStep(
                 region = [];
                 return false;
             }
-        }
+            finally
+            {
+                _sync.Release();
+            }
     }
 
     public void Dispose()
@@ -2713,10 +2732,12 @@ __kernel void FloodFillStep(
 
     private void WriteBuffer<T>(IMem<T> buffer, T[] data) where T : struct
     {
+        // Non-blocking write â€” the in-order command queue guarantees completion
+        // before any subsequent kernel dispatch or blocking read.
         ErrorCode error = Cl.EnqueueWriteBuffer(
             _queue,
             buffer,
-            Bool.True,
+            Bool.False,
             data,
             0,
             null!,
@@ -2790,13 +2811,13 @@ __kernel void FloodFillStep(
             out _lastKernelEvent);
         ThrowOnError(error, "Failed to execute OpenCL kernel.");
         _hasKernelEvent = true;
-        // No Cl.Finish() — the subsequent blocking EnqueueReadBuffer
+        // No Cl.Finish() â€” the subsequent blocking EnqueueReadBuffer
         // implicitly waits for all prior commands on this in-order queue.
     }
 
     /// <summary>
-    /// Enqueues a 3D NDRange kernel (e.g. gradient volume: sizeX × sizeY × sizeZ).
-    /// Uses a fixed 4×4×4 local work-group size, which balances occupancy across all three dimensions.
+    /// Enqueues a 3D NDRange kernel (e.g. gradient volume: sizeX Ã— sizeY Ã— sizeZ).
+    /// Uses a fixed 4Ã—4Ã—4 local work-group size, which balances occupancy across all three dimensions.
     /// </summary>
     private void Execute3D(OpenClKernel kernel, int sizeX, int sizeY, int sizeZ)
     {
