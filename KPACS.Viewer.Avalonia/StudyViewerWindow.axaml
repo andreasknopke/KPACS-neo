@@ -645,9 +645,11 @@
                             BorderThickness="1"
                             CornerRadius="8"
                             Padding="8,6">
-                        <Canvas x:Name="VolumeRoiDraftCanvas"
-                                Width="320"
-                                Height="160" />
+                        <Image x:Name="VolumeRoiDraftImage"
+                               Width="320"
+                               Height="160"
+                               Stretch="None"
+                               RenderOptions.BitmapInterpolationMode="LowQuality" />
                     </Border>
                     <TextBlock x:Name="VolumeRoiDraftHintText"
                                Foreground="#FFD3E5F5"
@@ -934,6 +936,7 @@
                             Minimum="-180"
                             Maximum="180"
                             TickFrequency="5"
+                            IsSnapToTickEnabled="True"
                             SmallChange="5"
                             LargeChange="15"
                             Value="0"

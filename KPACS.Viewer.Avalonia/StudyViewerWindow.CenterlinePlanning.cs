@@ -7,6 +7,7 @@ using KPACS.Viewer.Controls;
 using KPACS.Viewer.Models;
 using KPACS.Viewer.Rendering;
 using KPACS.Viewer.Services;
+using SpatialVector3D = KPACS.Viewer.Models.Vector3D;
 
 namespace KPACS.Viewer;
 
@@ -418,7 +419,7 @@ public partial class StudyViewerWindow
             measurement.Kind != MeasurementKind.VolumeRoi ||
             measurement.VolumeContours is not { Length: > 0 } ||
             !TryResolveSeriesVolumeForCenterlineMeasurement(measurement, out SeriesVolume volume) ||
-            !TryEnsureMeasurementSegmentationMask(measurement, volume, out StudyMeasurement updatedMeasurement, out mask))
+            !TryEnsureMeasurementSegmentationMask(measurement, volume, seedSet, out StudyMeasurement updatedMeasurement, out mask))
         {
             return false;
         }
@@ -488,6 +489,7 @@ public partial class StudyViewerWindow
     private bool TryEnsureMeasurementSegmentationMask(
         StudyMeasurement measurement,
         SeriesVolume volume,
+        CenterlineSeedSet seedSet,
         out StudyMeasurement updatedMeasurement,
         out SegmentationMask3D mask)
     {
@@ -501,7 +503,7 @@ public partial class StudyViewerWindow
             return true;
         }
 
-        if (!TryCreateSegmentationMaskFromVolumeRoiMeasurement(measurement, volume, out mask))
+        if (!TryCreateSegmentationMaskFromVolumeRoiMeasurement(measurement, volume, seedSet, out mask))
         {
             return false;
         }
@@ -520,13 +522,18 @@ public partial class StudyViewerWindow
     private static bool TryCreateSegmentationMaskFromVolumeRoiMeasurement(
         StudyMeasurement measurement,
         SeriesVolume volume,
+        CenterlineSeedSet seedSet,
         out SegmentationMask3D mask)
     {
         mask = null!;
-        if (measurement.VolumeContours is not { Length: > 0 } contours)
+        if (measurement.VolumeContours is not { Length: > 0 } allContours)
         {
             return false;
         }
+
+        // Clip contours to the range between start and end seeds so the
+        // mask only covers the vessel segment the user actually wants.
+        VolumeRoiContour[] contours = ClipContoursToSeedRange(allContours, seedSet);
 
         VolumeGridGeometry geometry = new(
             volume.SizeX,
@@ -544,53 +551,83 @@ public partial class StudyViewerWindow
         SegmentationMaskBuffer buffer = new(geometry);
         bool wroteForeground = false;
 
-        foreach (VolumeRoiContour contour in contours.Where(candidate => candidate.IsClosed && candidate.Anchors.Length >= 3))
+        // Group closed contours by component and sort by plane position so we
+        // can interpolate between consecutive drawn contours — filling every
+        // integer Z-slice in between.  Without this, slices between drawn
+        // contours are left empty and the centerline A* search cannot find a
+        // connected path through the mask.
+        foreach (IGrouping<int, VolumeRoiContour> componentGroup in contours
+            .Where(candidate => candidate.IsClosed && candidate.Anchors.Length >= 3)
+            .GroupBy(candidate => candidate.ComponentId))
         {
-            Point[] voxelPolygon = contour.Anchors
-                .Where(anchor => anchor.PatientPoint is not null)
-                .Select(anchor => volume.PatientToVoxel(anchor.PatientPoint!.Value))
-                .Select(voxel => new Point(voxel.X, voxel.Y))
-                .ToArray();
-            if (voxelPolygon.Length < 3)
-            {
-                continue;
-            }
+            List<(VolumeRoiContour Contour, Point[] VoxelPolygon, int VoxelZ)> orderedContours = [];
 
-            double[] voxelZs = contour.Anchors
-                .Where(anchor => anchor.PatientPoint is not null)
-                .Select(anchor => volume.PatientToVoxel(anchor.PatientPoint!.Value).Z)
-                .ToArray();
-            if (voxelZs.Length == 0)
+            foreach (VolumeRoiContour contour in componentGroup.OrderBy(c => c.PlanePosition))
             {
-                continue;
-            }
-
-            int z = (int)Math.Round(voxelZs.Average());
-            if (z < 0 || z >= geometry.SizeZ)
-            {
-                continue;
-            }
-
-            int minX = Math.Max(0, (int)Math.Floor(voxelPolygon.Min(point => point.X)));
-            int maxX = Math.Min(geometry.SizeX - 1, (int)Math.Ceiling(voxelPolygon.Max(point => point.X)));
-            int minY = Math.Max(0, (int)Math.Floor(voxelPolygon.Min(point => point.Y)));
-            int maxY = Math.Min(geometry.SizeY - 1, (int)Math.Ceiling(voxelPolygon.Max(point => point.Y)));
-            if (minX > maxX || minY > maxY)
-            {
-                continue;
-            }
-
-            for (int y = minY; y <= maxY; y++)
-            {
-                for (int x = minX; x <= maxX; x++)
+                Point[] voxelPolygon = contour.Anchors
+                    .Where(anchor => anchor.PatientPoint is not null)
+                    .Select(anchor => volume.PatientToVoxel(anchor.PatientPoint!.Value))
+                    .Select(voxel => new Point(voxel.X, voxel.Y))
+                    .ToArray();
+                if (voxelPolygon.Length < 3)
                 {
-                    if (!IsPointInsideVoxelPolygon(new Point(x + 0.5, y + 0.5), voxelPolygon))
+                    continue;
+                }
+
+                double[] voxelZs = contour.Anchors
+                    .Where(anchor => anchor.PatientPoint is not null)
+                    .Select(anchor => volume.PatientToVoxel(anchor.PatientPoint!.Value).Z)
+                    .ToArray();
+                if (voxelZs.Length == 0)
+                {
+                    continue;
+                }
+
+                int z = (int)Math.Round(voxelZs.Average());
+                if (z < 0 || z >= geometry.SizeZ)
+                {
+                    continue;
+                }
+
+                orderedContours.Add((contour, voxelPolygon, z));
+            }
+
+            // Rasterize each drawn contour at its own Z-slice.
+            foreach ((_, Point[] voxelPolygon, int z) in orderedContours)
+            {
+                if (RasterizePolygonSlice(buffer, geometry, voxelPolygon, z))
+                {
+                    wroteForeground = true;
+                }
+            }
+
+            // Interpolate between each consecutive pair of drawn contours to
+            // fill every integer Z-slice in between.
+            for (int ci = 0; ci < orderedContours.Count - 1; ci++)
+            {
+                (VolumeRoiContour lower, Point[] lowerPoly, int zA) = orderedContours[ci];
+                (VolumeRoiContour upper, Point[] upperPoly, int zB) = orderedContours[ci + 1];
+
+                int zMin = Math.Min(zA, zB);
+                int zMax = Math.Max(zA, zB);
+                if (zMax - zMin <= 1)
+                {
+                    continue; // adjacent or same slice — no gap
+                }
+
+                for (int z = zMin + 1; z < zMax; z++)
+                {
+                    double t = (z - zMin) / (double)(zMax - zMin);
+                    Point[] interpolatedPoly = InterpolateVoxelPolygon(lowerPoly, upperPoly, t);
+                    if (interpolatedPoly.Length < 3)
                     {
                         continue;
                     }
 
-                    buffer.Set(x, y, z, true);
-                    wroteForeground = true;
+                    if (RasterizePolygonSlice(buffer, geometry, interpolatedPoly, z))
+                    {
+                        wroteForeground = true;
+                    }
                 }
             }
         }
@@ -618,6 +655,179 @@ public partial class StudyViewerWindow
                 revision: 0,
                 buffer.ComputeStatistics()));
         return true;
+    }
+
+    /// <summary>
+    /// Clips the contour array to only include contours whose
+    /// <see cref="VolumeRoiContour.PlanePosition"/> falls between the start
+    /// and end seed positions.  If no seeds are placed, returns all contours.
+    /// </summary>
+    private static VolumeRoiContour[] ClipContoursToSeedRange(
+        VolumeRoiContour[] contours,
+        CenterlineSeedSet seedSet)
+    {
+        if (seedSet.StartSeed is not { } startSeed ||
+            seedSet.EndSeed is not { } endSeed ||
+            contours.Length == 0)
+        {
+            return contours;
+        }
+
+        SpatialVector3D normal = contours[0].Normal.Normalize();
+        if (normal.Length < 0.5)
+        {
+            return contours;
+        }
+
+        SpatialVector3D startPt = startSeed.PatientPoint;
+        SpatialVector3D endPt = endSeed.PatientPoint;
+        double startPos = startPt.Dot(normal);
+        double endPos = endPt.Dot(normal);
+
+        // Add a small margin (≈ 0.6 × average slice spacing) so the end
+        // contours aren't trimmed by floating-point rounding.
+        double margin = contours.Length >= 2
+            ? Math.Abs(contours[^1].PlanePosition - contours[0].PlanePosition) / Math.Max(1, contours.Length - 1) * 0.6
+            : 2.0;
+
+        double lo = Math.Min(startPos, endPos) - margin;
+        double hi = Math.Max(startPos, endPos) + margin;
+
+        VolumeRoiContour[] clipped = contours
+            .Where(c => c.PlanePosition >= lo && c.PlanePosition <= hi)
+            .ToArray();
+
+        return clipped.Length > 0 ? clipped : contours;
+    }
+
+    /// <summary>
+    /// Rasterizes a 2D voxel polygon into the mask buffer at the given Z-slice.
+    /// Returns <see langword="true"/> if any foreground voxels were written.
+    /// </summary>
+    private static bool RasterizePolygonSlice(
+        SegmentationMaskBuffer buffer,
+        VolumeGridGeometry geometry,
+        Point[] voxelPolygon,
+        int z)
+    {
+        if (z < 0 || z >= geometry.SizeZ || voxelPolygon.Length < 3)
+        {
+            return false;
+        }
+
+        int minX = Math.Max(0, (int)Math.Floor(voxelPolygon.Min(point => point.X)));
+        int maxX = Math.Min(geometry.SizeX - 1, (int)Math.Ceiling(voxelPolygon.Max(point => point.X)));
+        int minY = Math.Max(0, (int)Math.Floor(voxelPolygon.Min(point => point.Y)));
+        int maxY = Math.Min(geometry.SizeY - 1, (int)Math.Ceiling(voxelPolygon.Max(point => point.Y)));
+        if (minX > maxX || minY > maxY)
+        {
+            return false;
+        }
+
+        bool wrote = false;
+        for (int y = minY; y <= maxY; y++)
+        {
+            for (int x = minX; x <= maxX; x++)
+            {
+                if (!IsPointInsideVoxelPolygon(new Point(x + 0.5, y + 0.5), voxelPolygon))
+                {
+                    continue;
+                }
+
+                buffer.Set(x, y, z, true);
+                wrote = true;
+            }
+        }
+
+        return wrote;
+    }
+
+    /// <summary>
+    /// Linearly interpolates between two voxel-space polygons at parameter
+    /// <paramref name="t"/> (0 = <paramref name="lower"/>, 1 = <paramref name="upper"/>).
+    /// When the polygons have different vertex counts the shorter one is
+    /// resampled to match the longer.
+    /// </summary>
+    private static Point[] InterpolateVoxelPolygon(Point[] lower, Point[] upper, double t)
+    {
+        if (lower.Length == 0 || upper.Length == 0)
+        {
+            return [];
+        }
+
+        // If vertex counts differ, resample the shorter polygon to match.
+        if (lower.Length != upper.Length)
+        {
+            int targetCount = Math.Max(lower.Length, upper.Length);
+            if (lower.Length < targetCount)
+            {
+                lower = ResamplePolygon(lower, targetCount);
+            }
+
+            if (upper.Length < targetCount)
+            {
+                upper = ResamplePolygon(upper, targetCount);
+            }
+        }
+
+        Point[] result = new Point[lower.Length];
+        for (int i = 0; i < lower.Length; i++)
+        {
+            result[i] = new Point(
+                lower[i].X + ((upper[i].X - lower[i].X) * t),
+                lower[i].Y + ((upper[i].Y - lower[i].Y) * t));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Resamples a closed polygon to have exactly <paramref name="count"/>
+    /// equally-spaced vertices.
+    /// </summary>
+    private static Point[] ResamplePolygon(Point[] polygon, int count)
+    {
+        if (polygon.Length < 2 || count < 3)
+        {
+            return polygon;
+        }
+
+        double[] cumulative = new double[polygon.Length + 1];
+        for (int i = 0; i < polygon.Length; i++)
+        {
+            double dx = polygon[(i + 1) % polygon.Length].X - polygon[i].X;
+            double dy = polygon[(i + 1) % polygon.Length].Y - polygon[i].Y;
+            cumulative[i + 1] = cumulative[i] + Math.Sqrt((dx * dx) + (dy * dy));
+        }
+
+        double totalLength = cumulative[^1];
+        if (totalLength <= double.Epsilon)
+        {
+            return polygon;
+        }
+
+        Point[] result = new Point[count];
+        double step = totalLength / count;
+        int segmentIndex = 0;
+        for (int i = 0; i < count; i++)
+        {
+            double target = i * step;
+            while (segmentIndex < polygon.Length - 1 && cumulative[segmentIndex + 1] < target)
+            {
+                segmentIndex++;
+            }
+
+            double segStart = cumulative[segmentIndex];
+            double segEnd = cumulative[segmentIndex + 1];
+            double segLen = Math.Max(double.Epsilon, segEnd - segStart);
+            double u = (target - segStart) / segLen;
+            int next = (segmentIndex + 1) % polygon.Length;
+            result[i] = new Point(
+                polygon[segmentIndex].X + ((polygon[next].X - polygon[segmentIndex].X) * u),
+                polygon[segmentIndex].Y + ((polygon[next].Y - polygon[segmentIndex].Y) * u));
+        }
+
+        return result;
     }
 
     private static bool IsPointInsideVoxelPolygon(Point point, IReadOnlyList<Point> polygon)

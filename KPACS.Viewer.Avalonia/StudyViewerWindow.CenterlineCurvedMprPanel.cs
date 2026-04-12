@@ -31,6 +31,7 @@ public partial class StudyViewerWindow
     private Point _centerlineCurvedMprDragStartOffset;
     private CancellationTokenSource? _centerlineCurvedMprRenderCancellation;
     private int _centerlineCurvedMprRenderVersion;
+    private bool _isUpdatingCurvedMprRotationSlider;
     private Guid? _centerlineCurvedMprRenderedPathId;
     private double _centerlineCurvedMprRenderedRotationDegrees = double.NaN;
     private CurvedMprDisplayOrientation _centerlineCurvedMprDisplayOrientation = CurvedMprDisplayOrientation.Horizontal;
@@ -70,7 +71,16 @@ public partial class StudyViewerWindow
         CenterlineCurvedMprPinButton.IsChecked = _centerlineCurvedMprPinned;
         CenterlineCurvedMprTitleText.Text = "Curved MPR";
         CenterlineCurvedMprSummaryText.Text = $"{seedSet.Label} · {path.Summary}";
-        CenterlineCurvedMprRotationSlider.Value = _centerlineCurvedMprRotationDegrees;
+        _isUpdatingCurvedMprRotationSlider = true;
+        try
+        {
+            CenterlineCurvedMprRotationSlider.Value = _centerlineCurvedMprRotationDegrees;
+        }
+        finally
+        {
+            _isUpdatingCurvedMprRotationSlider = false;
+        }
+
         CenterlineCurvedMprRotationValueText.Text = BuildCenterlineCurvedMprRotationLabel();
 
         int stationIndex = GetSelectedCenterlineStationIndex(path);
@@ -233,6 +243,7 @@ public partial class StudyViewerWindow
         }
 
         CenterlineCurvedMprImage.Source = _centerlineCurvedMprBitmap;
+        CenterlineCurvedMprImage.InvalidateVisual();
     }
 
     private void EnsureCenterlineCurvedMprBitmap(int width, int height)
@@ -291,6 +302,11 @@ public partial class StudyViewerWindow
 
     private void OnCenterlineCurvedMprRotationSliderValueChanged(object? sender, RangeBaseValueChangedEventArgs e)
     {
+        if (_isUpdatingCurvedMprRotationSlider)
+        {
+            return;
+        }
+
         ApplyCenterlineCurvedMprRotation(e.NewValue, updateSlider: false);
     }
 

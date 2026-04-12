@@ -1,8 +1,10 @@
+using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
-using Avalonia.Controls.Shapes;
 using Avalonia.Input;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using Avalonia.Threading;
 using KPACS.Viewer.Controls;
 using KPACS.Viewer.Models;
@@ -16,7 +18,7 @@ public partial class StudyViewerWindow
     private const double DefaultVolumeRoiPreviewPitch = 0.38;
     private const double VolumeRoiPreviewStep = 0.12;
     private const double VolumeRoiPreviewAcceleratedStep = 0.18;
-    private const double VolumeRoiPreviewAutoRotateYawStep = 0.055;
+    private const double VolumeRoiPreviewAutoRotateYawStep = 0.020;
     private const double VolumeRoiPreviewAutoRotatePitchAmplitude = 0.22;
     private const double VolumeRoiPreviewAutoRotatePitchBase = 0.16;
     private const int SavedVolumeRoiPreviewHighSampleCount = 32;
@@ -36,6 +38,8 @@ public partial class StudyViewerWindow
     private IPointer? _volumeRoiPreviewDragPointer;
     private Point _volumeRoiPreviewDragStart;
     private Point _volumeRoiPreviewDragStartOffset;
+    private WriteableBitmap? _volumeRoiPreviewBitmap;
+    private VolumeRoiMeshCache? _volumeRoiMeshCache;
 
     private void ScheduleVolumeRoiDraftPanelRefresh()
     {
@@ -45,7 +49,7 @@ public partial class StudyViewerWindow
 
     private void InitializeVolumeRoiDraftPreviewControls()
     {
-        _volumeRoiPreviewAutoRotateTimer.Interval = TimeSpan.FromMilliseconds(90);
+        _volumeRoiPreviewAutoRotateTimer.Interval = TimeSpan.FromMilliseconds(33);
         _volumeRoiPreviewAutoRotateTimer.Tick += OnVolumeRoiPreviewAutoRotateTimerTick;
         VolumeRoiAutoRotateCheckBox.IsChecked = _volumeRoiPreviewAutoRotateEnabled;
         UpdateVolumeRoiAutoRotateState();
@@ -156,7 +160,8 @@ public partial class StudyViewerWindow
         VolumeRoiAddButton.IsVisible = false;
         VolumeRoiAddButton.IsChecked = false;
         VolumeRoiDraftPinButton.IsChecked = _volumeRoiPreviewPinned;
-        VolumeRoiDraftCanvas.Children.Clear();
+        VolumeRoiDraftImage.Source = null;
+        _volumeRoiMeshCache = null;
         VolumeRoiDraftStatusText.Text = string.Empty;
         VolumeRoiDraftCorrectionRow.IsVisible = false;
         VolumeRoiShrinkButton.IsEnabled = false;
@@ -309,7 +314,7 @@ public partial class StudyViewerWindow
             return;
         }
 
-        _volumeRoiPreviewAutoRotatePhase += 0.18;
+        _volumeRoiPreviewAutoRotatePhase += 0.066;
         _volumeRoiPreviewYaw += VolumeRoiPreviewAutoRotateYawStep;
         _volumeRoiPreviewPitch = Math.Clamp(
             VolumeRoiPreviewAutoRotatePitchBase + (Math.Sin(_volumeRoiPreviewAutoRotatePhase) * VolumeRoiPreviewAutoRotatePitchAmplitude),
@@ -430,7 +435,22 @@ public partial class StudyViewerWindow
                 ? metadata.Origin.Dot(metadata.Normal)
                 : measurement.VolumeContours[0].PlanePosition;
 
-        List<DicomViewPanel.VolumeRoiDraftPreviewContour> contours = BuildMeasurementVolumeRoiPreviewContours(measurement.VolumeContours, currentPlanePosition);
+        VolumeRoiContour[] sourceContours = measurement.VolumeContours;
+        (double? clipMin, double? clipMax) = GetCenterlineSeedPlanePositionRange(sourceContours);
+        if (clipMin is not null && clipMax is not null)
+        {
+            double lo = Math.Min(clipMin.Value, clipMax.Value);
+            double hi = Math.Max(clipMin.Value, clipMax.Value);
+            sourceContours = sourceContours
+                .Where(c => c.PlanePosition >= lo && c.PlanePosition <= hi)
+                .ToArray();
+            if (sourceContours.Length == 0)
+            {
+                sourceContours = measurement.VolumeContours;
+            }
+        }
+
+        List<DicomViewPanel.VolumeRoiDraftPreviewContour> contours = BuildMeasurementVolumeRoiPreviewContours(sourceContours, currentPlanePosition);
         if (contours.Count == 0)
         {
             return false;
@@ -438,10 +458,10 @@ public partial class StudyViewerWindow
 
         preview = new DicomViewPanel.VolumeRoiDraftPreview(
             slot.Panel.OrientationLabel,
-            measurement.VolumeContours.Count(contour => contour.IsClosed && contour.Anchors.Length >= 3),
+            sourceContours.Count(contour => contour.IsClosed && contour.Anchors.Length >= 3),
             contours.Count(contour => contour.IsClosed),
-            EstimateMeasurementVolumeCubicMillimeters(measurement.VolumeContours),
-            measurement.VolumeContours.Min(contour => contour.PlanePosition),
+            EstimateMeasurementVolumeCubicMillimeters(sourceContours),
+            sourceContours.Min(contour => contour.PlanePosition),
             currentPlanePosition,
             contours);
         return true;
@@ -538,6 +558,48 @@ public partial class StudyViewerWindow
             >= 18 => SavedVolumeRoiPreviewMediumSampleCount,
             _ => SavedVolumeRoiPreviewHighSampleCount,
         };
+    }
+
+    /// <summary>
+    /// Returns the plane-position range spanned by the active centerline
+    /// seed set (start → end), projected onto the contour normal.  This is
+    /// used to clip the 3D ROI preview and the segmentation mask so only
+    /// the portion between the two seeds is rendered / rasterized.
+    /// </summary>
+    private (double? Min, double? Max) GetCenterlineSeedPlanePositionRange(
+        IReadOnlyList<VolumeRoiContour> contours)
+    {
+        if (_selectedCenterlineSeedSetId is not Guid seedSetId ||
+            !_centerlineSeedSets.TryGetValue(seedSetId, out CenterlineSeedSet? seedSet) ||
+            seedSet.StartSeed is null ||
+            seedSet.EndSeed is null ||
+            contours.Count == 0)
+        {
+            return (null, null);
+        }
+
+        // Use the contour normal to project seed patient-space points to
+        // plane-position values comparable with VolumeRoiContour.PlanePosition.
+        SpatialVector3D normal = contours[0].Normal.Normalize();
+        if (normal.Length < 0.5)
+        {
+            return (null, null);
+        }
+
+        SpatialVector3D startPt = seedSet.StartSeed.PatientPoint;
+        SpatialVector3D endPt = seedSet.EndSeed.PatientPoint;
+        double startPos = startPt.Dot(normal);
+        double endPos = endPt.Dot(normal);
+
+        // Add a small margin (half a typical slice thickness) so the end
+        // contours aren't accidentally trimmed by float rounding.
+        double margin = contours.Count >= 2
+            ? Math.Abs(contours[^1].PlanePosition - contours[0].PlanePosition) / Math.Max(1, contours.Count - 1) * 0.6
+            : 2.0;
+
+        double lo = Math.Min(startPos, endPos) - margin;
+        double hi = Math.Max(startPos, endPos) + margin;
+        return (lo, hi);
     }
 
     private static bool IsCurrentMeasurementPlane(double planePosition, double currentPlanePosition) => Math.Abs(planePosition - currentPlanePosition) <= 0.25;
@@ -662,7 +724,7 @@ public partial class StudyViewerWindow
             return 1;
         }
 
-        return Math.Clamp((int)Math.Round(gapMillimeters / 3.0, MidpointRounding.AwayFromZero), 1, 8);
+        return Math.Clamp((int)Math.Round(gapMillimeters / 3.0, MidpointRounding.AwayFromZero), 1, 24);
     }
 
     private static double EstimateMeasurementVolumeCubicMillimeters(IEnumerable<VolumeRoiContour> sourceContours)
@@ -790,192 +852,373 @@ public partial class StudyViewerWindow
 
     private void RenderVolumeRoiDraftPreview(DicomViewPanel.VolumeRoiDraftPreview preview)
     {
-        VolumeRoiDraftCanvas.Children.Clear();
+        const int bitmapWidth = 320;
+        const int bitmapHeight = 160;
+        const double margin = 12;
+
         if (preview.Contours.Count == 0)
         {
+            VolumeRoiDraftImage.Source = null;
             return;
         }
 
-        List<SpatialVector3D> allPoints = preview.Contours.SelectMany(contour => contour.PatientPoints).ToList();
-        if (allPoints.Count == 0)
+        if (!ReferenceEquals(_volumeRoiMeshCache?.Preview, preview))
         {
+            _volumeRoiMeshCache = BuildVolumeRoiMeshCache(preview);
+        }
+
+        VolumeRoiMeshCache cache = _volumeRoiMeshCache;
+        if (cache.Vertices.Length == 0)
+        {
+            VolumeRoiDraftImage.Source = null;
             return;
         }
 
-        SpatialVector3D center = new(
-            allPoints.Average(point => point.X),
-            allPoints.Average(point => point.Y),
-            allPoints.Average(point => point.Z));
-
-        List<PreviewContourGeometry> contourGeometry = preview.Contours
-            .Select(contour => new PreviewContourGeometry(
-                contour,
-                contour.PatientPoints.Select(point => RotateVolumeRoiPoint(point - center)).ToArray()))
-            .Where(geometry => geometry.Points.Length > 0)
-            .OrderBy(geometry => geometry.Contour.PlanePosition)
-            .ToList();
-        if (contourGeometry.Count == 0)
-        {
-            return;
-        }
-
-        List<PreviewTriangle> triangles = BuildPreviewTriangles(contourGeometry);
-        IEnumerable<Point> projectedPoints = contourGeometry.SelectMany(contour => contour.Points.Select(ProjectVolumeRoiPoint));
-        double minX = projectedPoints.Min(point => point.X);
-        double maxX = projectedPoints.Max(point => point.X);
-        double minY = projectedPoints.Min(point => point.Y);
-        double maxY = projectedPoints.Max(point => point.Y);
-        double width = Math.Max(1, maxX - minX);
-        double height = Math.Max(1, maxY - minY);
-        double canvasWidth = VolumeRoiDraftCanvas.Width;
-        double canvasHeight = VolumeRoiDraftCanvas.Height;
-        double scale = Math.Min((canvasWidth - 24) / width, (canvasHeight - 24) / height);
-        scale = double.IsFinite(scale) && scale > 0 ? scale : 1;
-        double offsetX = 12 + (((canvasWidth - 24) - (width * scale)) * 0.5);
-        double offsetY = 12 + (((canvasHeight - 24) - (height * scale)) * 0.5);
-
-        foreach (PreviewTriangle triangle in triangles.OrderBy(triangle => triangle.Depth))
-        {
-            Point[] transformed =
-            [
-                TransformPreviewPoint(ProjectVolumeRoiPoint(triangle.A), minX, minY, scale, offsetX, offsetY),
-                TransformPreviewPoint(ProjectVolumeRoiPoint(triangle.B), minX, minY, scale, offsetX, offsetY),
-                TransformPreviewPoint(ProjectVolumeRoiPoint(triangle.C), minX, minY, scale, offsetX, offsetY),
-            ];
-
-            Color fillColor = GetVolumeRoiPreviewColor(preview.FirstPlanePosition, triangle.PlanePosition, triangle.IsCurrentSlice, triangle.IsInterpolated);
-            fillColor = ApplyPreviewLighting(fillColor, triangle.Shading);
-
-            var polygon = new Polygon
-            {
-                Points = new Points(transformed),
-                Fill = new SolidColorBrush(fillColor),
-                Stroke = new SolidColorBrush(Color.FromArgb(110, fillColor.R, fillColor.G, fillColor.B)),
-                StrokeThickness = triangle.IsCurrentSlice ? 1.1 : 0.7,
-            };
-            VolumeRoiDraftCanvas.Children.Add(polygon);
-        }
-
-        foreach (PreviewContourGeometry contour in contourGeometry)
-        {
-            Color strokeColor = GetVolumeRoiPreviewColor(preview.FirstPlanePosition, contour.Contour.PlanePosition, contour.Contour.IsCurrentSlice, contour.Contour.IsInterpolated);
-            var polyline = new Polyline
-            {
-                Points = new Points(contour.Points.Select(point =>
-                    TransformPreviewPoint(ProjectVolumeRoiPoint(point), minX, minY, scale, offsetX, offsetY))),
-                Stroke = new SolidColorBrush(Color.FromArgb(
-                    contour.Contour.IsInterpolated ? (byte)80 : (byte)180,
-                    strokeColor.R,
-                    strokeColor.G,
-                    strokeColor.B)),
-                StrokeThickness = contour.Contour.IsCurrentSlice ? 2.2 : contour.Contour.IsInterpolated ? 1.0 : 1.4,
-            };
-            VolumeRoiDraftCanvas.Children.Add(polyline);
-
-            if (contour.Contour.IsClosed && polyline.Points.Count >= 3)
-            {
-                VolumeRoiDraftCanvas.Children.Add(new Line
-                {
-                    StartPoint = polyline.Points[^1],
-                    EndPoint = polyline.Points[0],
-                    Stroke = polyline.Stroke,
-                    StrokeThickness = polyline.StrokeThickness,
-                });
-            }
-        }
-    }
-
-    private SpatialVector3D RotateVolumeRoiPoint(SpatialVector3D point)
-    {
         double cosYaw = Math.Cos(_volumeRoiPreviewYaw);
         double sinYaw = Math.Sin(_volumeRoiPreviewYaw);
         double cosPitch = Math.Cos(_volumeRoiPreviewPitch);
         double sinPitch = Math.Sin(_volumeRoiPreviewPitch);
 
-        double x1 = (point.X * cosYaw) - (point.Z * sinYaw);
-        double z1 = (point.X * sinYaw) + (point.Z * cosYaw);
-        double y1 = point.Y;
-        double y2 = (y1 * cosPitch) - (z1 * sinPitch);
-        double z2 = (y1 * sinPitch) + (z1 * cosPitch);
+        int vertexCount = cache.Vertices.Length;
+        float[] sx = new float[vertexCount];
+        float[] sy = new float[vertexCount];
+        float[] sz = new float[vertexCount];
 
-        return new SpatialVector3D(x1, y2, z2);
-    }
+        double minX = double.MaxValue, maxX = double.MinValue;
+        double minY = double.MaxValue, maxY = double.MinValue;
 
-    private static Point ProjectVolumeRoiPoint(SpatialVector3D point) => new(point.X, point.Y);
-
-    private static Point TransformPreviewPoint(Point point, double minX, double minY, double scale, double offsetX, double offsetY) =>
-        new(
-            offsetX + ((point.X - minX) * scale),
-            offsetY + ((point.Y - minY) * scale));
-
-    private static List<PreviewTriangle> BuildPreviewTriangles(IReadOnlyList<PreviewContourGeometry> contours)
-    {
-        List<PreviewTriangle> triangles = [];
-
-        foreach (List<PreviewContourGeometry> closedContours in contours
-            .Where(contour => contour.Contour.IsClosed && contour.Points.Length >= 3)
-            .GroupBy(contour => contour.Contour.ComponentId)
-            .OrderBy(group => group.Key)
-            .Select(group => group.OrderBy(contour => contour.Contour.PlanePosition).ToList()))
+        for (int i = 0; i < vertexCount; i++)
         {
-            for (int contourIndex = 0; contourIndex < closedContours.Count - 1; contourIndex++)
-            {
-                PreviewContourGeometry first = closedContours[contourIndex];
-                PreviewContourGeometry second = closedContours[contourIndex + 1];
-                int pointCount = Math.Min(first.Points.Length, second.Points.Length);
-                for (int pointIndex = 0; pointIndex < pointCount; pointIndex++)
-                {
-                    SpatialVector3D a0 = first.Points[pointIndex];
-                    SpatialVector3D a1 = first.Points[(pointIndex + 1) % pointCount];
-                    SpatialVector3D b0 = second.Points[pointIndex];
-                    SpatialVector3D b1 = second.Points[(pointIndex + 1) % pointCount];
-                    double planePosition = (first.Contour.PlanePosition + second.Contour.PlanePosition) * 0.5;
-                    bool isCurrentSlice = first.Contour.IsCurrentSlice || second.Contour.IsCurrentSlice;
-                    bool isInterpolated = first.Contour.IsInterpolated || second.Contour.IsInterpolated;
+            SpatialVector3D p = cache.Vertices[i];
+            double x1 = (p.X * cosYaw) - (p.Z * sinYaw);
+            double z1 = (p.X * sinYaw) + (p.Z * cosYaw);
+            double y2 = (p.Y * cosPitch) - (z1 * sinPitch);
+            double z2 = (p.Y * sinPitch) + (z1 * cosPitch);
+            sx[i] = (float)x1;
+            sy[i] = (float)y2;
+            sz[i] = (float)z2;
+            if (x1 < minX) minX = x1;
+            if (x1 > maxX) maxX = x1;
+            if (y2 < minY) minY = y2;
+            if (y2 > maxY) maxY = y2;
+        }
 
-                    triangles.Add(CreatePreviewTriangle(a0, a1, b1, planePosition, isCurrentSlice, isInterpolated));
-                    triangles.Add(CreatePreviewTriangle(a0, b1, b0, planePosition, isCurrentSlice, isInterpolated));
-                }
+        double extentW = Math.Max(1, maxX - minX);
+        double extentH = Math.Max(1, maxY - minY);
+        double scale = Math.Min((bitmapWidth - 2 * margin) / extentW, (bitmapHeight - 2 * margin) / extentH);
+        if (!double.IsFinite(scale) || scale <= 0)
+        {
+            scale = 1;
+        }
+
+        double offsetX = margin + (((bitmapWidth - 2 * margin) - (extentW * scale)) * 0.5);
+        double offsetY = margin + (((bitmapHeight - 2 * margin) - (extentH * scale)) * 0.5);
+        float fMinX = (float)minX;
+        float fMinY = (float)minY;
+        float fScale = (float)scale;
+        float fOffX = (float)offsetX;
+        float fOffY = (float)offsetY;
+
+        float[] px = new float[vertexCount];
+        float[] py = new float[vertexCount];
+        for (int i = 0; i < vertexCount; i++)
+        {
+            px[i] = fOffX + ((sx[i] - fMinX) * fScale);
+            py[i] = fOffY + ((sy[i] - fMinY) * fScale);
+        }
+
+        int pixelCount = bitmapWidth * bitmapHeight;
+        uint[] pixels = new uint[pixelCount];
+        float[] depthBuf = new float[pixelCount];
+        Array.Fill(depthBuf, float.NegativeInfinity);
+
+        for (int ti = 0; ti < cache.Triangles.Length; ti++)
+        {
+            ref readonly CachedTriangleData tri = ref cache.Triangles[ti];
+            float ax = sx[tri.A], ay = sy[tri.A], az = sz[tri.A];
+            float bx = sx[tri.B], by = sy[tri.B], bz = sz[tri.B];
+            float cx = sx[tri.C], cy = sy[tri.C], cz = sz[tri.C];
+
+            float nx = ((by - ay) * (cz - az)) - ((bz - az) * (cy - ay));
+            float ny = ((bz - az) * (cx - ax)) - ((bx - ax) * (cz - az));
+            float nz = ((bx - ax) * (cy - ay)) - ((by - ay) * (cx - ax));
+            float nLen = MathF.Sqrt((nx * nx) + (ny * ny) + (nz * nz));
+            if (nLen > 1e-8f)
+            {
+                nz /= nLen;
+                ny /= nLen;
+            }
+            else
+            {
+                nz = 0;
+                ny = 0;
             }
 
-            if (closedContours.Count > 0)
+            double shading = Math.Clamp(0.45 + (0.4 * Math.Abs(nz)) + (0.15 * Math.Max(0, ny)), 0.2, 1.0);
+            Color baseColor = GetVolumeRoiPreviewColor(cache.FirstPlanePosition, tri.PlanePosition, tri.IsCurrentSlice, tri.IsInterpolated);
+            Color litColor = ApplyPreviewLighting(baseColor, shading);
+            uint pixel = ToPremultipliedBgra(litColor);
+
+            RasterizeTriangle(
+                pixels, depthBuf, bitmapWidth, bitmapHeight,
+                px[tri.A], py[tri.A], sz[tri.A],
+                px[tri.B], py[tri.B], sz[tri.B],
+                px[tri.C], py[tri.C], sz[tri.C],
+                pixel);
+        }
+
+        for (int ci = 0; ci < cache.Contours.Length; ci++)
+        {
+            ref readonly CachedContourData contour = ref cache.Contours[ci];
+            Color strokeBase = GetVolumeRoiPreviewColor(cache.FirstPlanePosition, contour.PlanePosition, contour.IsCurrentSlice, contour.IsInterpolated);
+            byte alpha = contour.IsInterpolated ? (byte)80 : (byte)180;
+            uint lineColor = ToPremultipliedBgra(Color.FromArgb(alpha, strokeBase.R, strokeBase.G, strokeBase.B));
+
+            int end = contour.IsClosed ? contour.VertexCount : contour.VertexCount - 1;
+            for (int pi = 0; pi < end; pi++)
             {
-                AddContourCapTriangles(triangles, closedContours[0]);
-                if (closedContours.Count > 1)
+                int idxA = contour.VertexOffset + pi;
+                int idxB = contour.VertexOffset + ((pi + 1) % contour.VertexCount);
+                DrawLine(pixels, bitmapWidth, bitmapHeight,
+                    (int)px[idxA], (int)py[idxA],
+                    (int)px[idxB], (int)py[idxB],
+                    lineColor);
+            }
+        }
+
+        EnsureVolumeRoiPreviewBitmap(bitmapWidth, bitmapHeight);
+        using (ILockedFramebuffer framebuffer = _volumeRoiPreviewBitmap!.Lock())
+        {
+            int rowBytes = bitmapWidth * 4;
+            if (framebuffer.RowBytes == rowBytes)
+            {
+                Marshal.Copy(MemoryMarshal.AsBytes(pixels.AsSpan()).ToArray(), 0, framebuffer.Address, pixelCount * 4);
+            }
+            else
+            {
+                byte[] raw = MemoryMarshal.AsBytes(pixels.AsSpan()).ToArray();
+                for (int row = 0; row < bitmapHeight; row++)
                 {
-                    AddContourCapTriangles(triangles, closedContours[^1]);
+                    Marshal.Copy(raw, row * rowBytes, IntPtr.Add(framebuffer.Address, row * framebuffer.RowBytes), rowBytes);
                 }
             }
         }
 
-        return triangles;
+        VolumeRoiDraftImage.Source = _volumeRoiPreviewBitmap;
+        VolumeRoiDraftImage.InvalidateVisual();
     }
 
-    private static void AddContourCapTriangles(List<PreviewTriangle> triangles, PreviewContourGeometry contour)
+    private void EnsureVolumeRoiPreviewBitmap(int width, int height)
     {
-        if (contour.Points.Length < 3)
+        if (_volumeRoiPreviewBitmap is not null &&
+            _volumeRoiPreviewBitmap.PixelSize.Width == width &&
+            _volumeRoiPreviewBitmap.PixelSize.Height == height)
         {
             return;
         }
 
-        SpatialVector3D center = new(
-            contour.Points.Average(point => point.X),
-            contour.Points.Average(point => point.Y),
-            contour.Points.Average(point => point.Z));
+        _volumeRoiPreviewBitmap = new WriteableBitmap(
+            new PixelSize(width, height),
+            new Vector(96, 96),
+            PixelFormat.Bgra8888,
+            AlphaFormat.Premul);
+    }
 
-        for (int index = 0; index < contour.Points.Length; index++)
+    private static VolumeRoiMeshCache BuildVolumeRoiMeshCache(DicomViewPanel.VolumeRoiDraftPreview preview)
+    {
+        List<SpatialVector3D> allPoints = preview.Contours.SelectMany(contour => contour.PatientPoints).ToList();
+        if (allPoints.Count == 0)
         {
-            SpatialVector3D first = contour.Points[index];
-            SpatialVector3D second = contour.Points[(index + 1) % contour.Points.Length];
-            triangles.Add(CreatePreviewTriangle(center, first, second, contour.Contour.PlanePosition, contour.Contour.IsCurrentSlice, contour.Contour.IsInterpolated));
+            return new VolumeRoiMeshCache(preview, 0, [], [], []);
+        }
+
+        SpatialVector3D center = new(
+            allPoints.Average(p => p.X),
+            allPoints.Average(p => p.Y),
+            allPoints.Average(p => p.Z));
+
+        List<SpatialVector3D> vertices = [];
+        List<(int Offset, int Count, DicomViewPanel.VolumeRoiDraftPreviewContour Contour)> contourMeta = [];
+
+        foreach (DicomViewPanel.VolumeRoiDraftPreviewContour contour in preview.Contours
+            .Where(c => c.PatientPoints.Count > 0)
+            .OrderBy(c => c.PlanePosition))
+        {
+            int offset = vertices.Count;
+            foreach (SpatialVector3D pt in contour.PatientPoints)
+            {
+                vertices.Add(pt - center);
+            }
+
+            contourMeta.Add((offset, contour.PatientPoints.Count, contour));
+        }
+
+        List<CachedTriangleData> triangles = [];
+
+        foreach (List<(int Offset, int Count, DicomViewPanel.VolumeRoiDraftPreviewContour Contour)> closedGroup in contourMeta
+            .Where(ci => ci.Contour.IsClosed && ci.Count >= 3)
+            .GroupBy(ci => ci.Contour.ComponentId)
+            .Select(g => g.OrderBy(ci => ci.Contour.PlanePosition).ToList()))
+        {
+            for (int ci = 0; ci < closedGroup.Count - 1; ci++)
+            {
+                var first = closedGroup[ci];
+                var second = closedGroup[ci + 1];
+                int pointCount = Math.Min(first.Count, second.Count);
+                double planePos = (first.Contour.PlanePosition + second.Contour.PlanePosition) * 0.5;
+                bool isCurrent = first.Contour.IsCurrentSlice || second.Contour.IsCurrentSlice;
+                bool isInterp = first.Contour.IsInterpolated || second.Contour.IsInterpolated;
+
+                for (int pi = 0; pi < pointCount; pi++)
+                {
+                    int a0 = first.Offset + pi;
+                    int a1 = first.Offset + ((pi + 1) % pointCount);
+                    int b0 = second.Offset + pi;
+                    int b1 = second.Offset + ((pi + 1) % pointCount);
+                    triangles.Add(new CachedTriangleData(a0, a1, b1, planePos, isCurrent, isInterp));
+                    triangles.Add(new CachedTriangleData(a0, b1, b0, planePos, isCurrent, isInterp));
+                }
+            }
+
+            if (closedGroup.Count > 0)
+            {
+                AddCachedCapTriangles(triangles, vertices, closedGroup[0]);
+                if (closedGroup.Count > 1)
+                {
+                    AddCachedCapTriangles(triangles, vertices, closedGroup[^1]);
+                }
+            }
+        }
+
+        CachedContourData[] contours = contourMeta.Select(ci => new CachedContourData(
+            ci.Offset, ci.Count,
+            ci.Contour.PlanePosition, ci.Contour.IsCurrentSlice,
+            ci.Contour.IsClosed, ci.Contour.IsInterpolated))
+            .ToArray();
+
+        return new VolumeRoiMeshCache(preview, preview.FirstPlanePosition, vertices.ToArray(), triangles.ToArray(), contours);
+    }
+
+    private static void AddCachedCapTriangles(
+        List<CachedTriangleData> triangles,
+        List<SpatialVector3D> vertices,
+        (int Offset, int Count, DicomViewPanel.VolumeRoiDraftPreviewContour Contour) cap)
+    {
+        if (cap.Count < 3)
+        {
+            return;
+        }
+
+        double cx = 0, cy = 0, cz = 0;
+        for (int i = 0; i < cap.Count; i++)
+        {
+            SpatialVector3D v = vertices[cap.Offset + i];
+            cx += v.X;
+            cy += v.Y;
+            cz += v.Z;
+        }
+
+        int centerIdx = vertices.Count;
+        vertices.Add(new SpatialVector3D(cx / cap.Count, cy / cap.Count, cz / cap.Count));
+
+        for (int i = 0; i < cap.Count; i++)
+        {
+            int first = cap.Offset + i;
+            int second = cap.Offset + ((i + 1) % cap.Count);
+            triangles.Add(new CachedTriangleData(
+                centerIdx, first, second,
+                cap.Contour.PlanePosition, cap.Contour.IsCurrentSlice, cap.Contour.IsInterpolated));
         }
     }
 
-    private static PreviewTriangle CreatePreviewTriangle(SpatialVector3D a, SpatialVector3D b, SpatialVector3D c, double planePosition, bool isCurrentSlice, bool isInterpolated)
+    private static void RasterizeTriangle(
+        uint[] pixels, float[] depth,
+        int width, int height,
+        float x0, float y0, float z0,
+        float x1, float y1, float z1,
+        float x2, float y2, float z2,
+        uint color)
     {
-        SpatialVector3D normal = (b - a).Cross(c - a).Normalize();
-        double shading = Math.Clamp(0.45 + (0.4 * Math.Abs(normal.Z)) + (0.15 * Math.Max(0, normal.Y)), 0.2, 1.0);
-        return new PreviewTriangle(a, b, c, planePosition, isCurrentSlice, isInterpolated, (a.Z + b.Z + c.Z) / 3.0, shading);
+        int minPx = Math.Max(0, (int)MathF.Floor(Math.Min(x0, Math.Min(x1, x2))));
+        int maxPx = Math.Min(width - 1, (int)MathF.Ceiling(Math.Max(x0, Math.Max(x1, x2))));
+        int minPy = Math.Max(0, (int)MathF.Floor(Math.Min(y0, Math.Min(y1, y2))));
+        int maxPy = Math.Min(height - 1, (int)MathF.Ceiling(Math.Max(y0, Math.Max(y1, y2))));
+
+        float denom = ((y1 - y2) * (x0 - x2)) + ((x2 - x1) * (y0 - y2));
+        if (MathF.Abs(denom) < 1e-6f)
+        {
+            return;
+        }
+
+        float invDenom = 1.0f / denom;
+
+        for (int py = minPy; py <= maxPy; py++)
+        {
+            float ey = py + 0.5f;
+            for (int px = minPx; px <= maxPx; px++)
+            {
+                float ex = px + 0.5f;
+                float w0 = (((y1 - y2) * (ex - x2)) + ((x2 - x1) * (ey - y2))) * invDenom;
+                float w1 = (((y2 - y0) * (ex - x2)) + ((x0 - x2) * (ey - y2))) * invDenom;
+                float w2 = 1.0f - w0 - w1;
+
+                if (w0 >= 0 && w1 >= 0 && w2 >= 0)
+                {
+                    float z = (w0 * z0) + (w1 * z1) + (w2 * z2);
+                    int idx = (py * width) + px;
+                    if (z > depth[idx])
+                    {
+                        depth[idx] = z;
+                        pixels[idx] = color;
+                    }
+                }
+            }
+        }
+    }
+
+    private static void DrawLine(uint[] pixels, int width, int height, int x0, int y0, int x1, int y1, uint color)
+    {
+        int dx = Math.Abs(x1 - x0);
+        int sx = x0 < x1 ? 1 : -1;
+        int dy = -Math.Abs(y1 - y0);
+        int sy = y0 < y1 ? 1 : -1;
+        int err = dx + dy;
+
+        while (true)
+        {
+            if (x0 >= 0 && x0 < width && y0 >= 0 && y0 < height)
+            {
+                pixels[(y0 * width) + x0] = color;
+            }
+
+            if (x0 == x1 && y0 == y1)
+            {
+                break;
+            }
+
+            int e2 = 2 * err;
+            if (e2 >= dy)
+            {
+                err += dy;
+                x0 += sx;
+            }
+
+            if (e2 <= dx)
+            {
+                err += dx;
+                y0 += sy;
+            }
+        }
+    }
+
+    private static uint ToPremultipliedBgra(Color c)
+    {
+        float a = c.A / 255f;
+        return (uint)(
+            (byte)(c.B * a) |
+            ((uint)(byte)(c.G * a) << 8) |
+            ((uint)(byte)(c.R * a) << 16) |
+            ((uint)c.A << 24));
     }
 
     private static Color GetVolumeRoiPreviewColor(double firstPlanePosition, double planePosition, bool isCurrentSlice, bool isInterpolated)
@@ -1005,17 +1248,26 @@ public partial class StudyViewerWindow
             (byte)Math.Clamp(Math.Round(color.B * factor), 0, 255));
     }
 
-    private sealed record PreviewContourGeometry(
-        DicomViewPanel.VolumeRoiDraftPreviewContour Contour,
-        SpatialVector3D[] Points);
+    private sealed record VolumeRoiMeshCache(
+        DicomViewPanel.VolumeRoiDraftPreview Preview,
+        double FirstPlanePosition,
+        SpatialVector3D[] Vertices,
+        CachedTriangleData[] Triangles,
+        CachedContourData[] Contours);
 
-    private sealed record PreviewTriangle(
-        SpatialVector3D A,
-        SpatialVector3D B,
-        SpatialVector3D C,
+    private readonly record struct CachedTriangleData(
+        int A,
+        int B,
+        int C,
         double PlanePosition,
         bool IsCurrentSlice,
-        bool IsInterpolated,
-        double Depth,
-        double Shading);
+        bool IsInterpolated);
+
+    private readonly record struct CachedContourData(
+        int VertexOffset,
+        int VertexCount,
+        double PlanePosition,
+        bool IsCurrentSlice,
+        bool IsClosed,
+        bool IsInterpolated);
 }

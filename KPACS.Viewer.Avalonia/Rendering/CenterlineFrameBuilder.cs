@@ -99,6 +99,12 @@ internal static class CenterlineFrameBuilder
             normal = binormal.Cross(tangent);
             normal = normal.Length > 1e-6 ? normal.Normalize() : new Vector3D(0, 1, 0);
 
+            // Store the UNROTATED normal for the next frame's continuity
+            // propagation.  The axial rotation is a view-only transform —
+            // feeding the rotated normal back into the Frenet frame walk
+            // would compound the angle (frame N would see N·θ instead of θ).
+            previousNormal = normal;
+
             if (Math.Abs(axialRotationRadians) > 1e-6)
             {
                 normal = RotateAroundAxis(normal, tangent, axialRotationRadians);
@@ -107,7 +113,6 @@ internal static class CenterlineFrameBuilder
                 binormal = binormal.Length > 1e-6 ? binormal.Normalize() : binormal;
             }
 
-            previousNormal = normal;
             frames.Add(new CenterlineSampleFrame(path.Points[index].PatientPoint, tangent, normal, binormal));
         }
 
