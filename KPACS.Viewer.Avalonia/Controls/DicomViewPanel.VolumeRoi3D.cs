@@ -94,30 +94,10 @@ public partial class DicomViewPanel
 
         VolumeRoiDraft finalizedDraft = CloneVolumeRoiDraft(_volumeRoiDraft);
 
-        VolumeRoiDraftContour[] closedContours = _volumeRoiDraft.Contours.Values
-            .Where(contour => contour.IsClosed && contour.Anchors.Count >= 3)
-            .OrderBy(contour => contour.PlanePosition)
-            .ToArray();
-        if (closedContours.Length == 0)
+        if (!OutlineEngine.TryBuildClosedContours(_volumeRoiDraft, out VolumeRoiContour[] contours))
         {
             return false;
         }
-
-        VolumeRoiContour[] contours = closedContours
-            .Select(contour => new VolumeRoiContour(
-                contour.Anchors.ToArray(),
-                contour.SourceFilePath,
-                contour.ReferencedSopInstanceUid,
-                contour.PlaneOrigin,
-                contour.RowDirection,
-                contour.ColumnDirection,
-                contour.Normal,
-                contour.PlanePosition,
-                contour.IsClosed,
-                contour.RowSpacing,
-                contour.ColumnSpacing,
-                contour.ComponentId))
-            .ToArray();
 
         SegmentationMask3D? segmentationMask = _volumeRoiDraft.SegmentationMask;
         StudyMeasurement measurement = StudyMeasurement.CreateVolumeRoi(FilePath, SpatialMetadata, contours, segmentationMask?.Id);

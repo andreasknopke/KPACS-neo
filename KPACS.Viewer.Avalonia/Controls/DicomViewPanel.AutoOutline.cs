@@ -591,43 +591,7 @@ public partial class DicomViewPanel
             throw new InvalidOperationException("A 3D volume is required to create a segmentation mask.");
         }
 
-        VolumeGridGeometry geometry = new(
-            _volume.SizeX,
-            _volume.SizeY,
-            _volume.SizeZ,
-            _volume.SpacingX > 0 ? _volume.SpacingX : 1.0,
-            _volume.SpacingY > 0 ? _volume.SpacingY : 1.0,
-            _volume.SpacingZ > 0 ? _volume.SpacingZ : 1.0,
-            _volume.Origin,
-            _volume.RowDirection.Normalize(),
-            _volume.ColumnDirection.Normalize(),
-            _volume.Normal.Normalize(),
-            _volume.FrameOfReferenceUid);
-
-        SegmentationMaskBuffer buffer = new(geometry);
-        foreach (int key in region)
-        {
-            DecodeVoxelKey(key, _volume.SizeX, _volume.SizeY, out int x, out int y, out int z);
-            buffer.Set(x, y, z, true);
-        }
-
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        return new SegmentationMask3D(
-            Guid.NewGuid(),
-            "Auto 3D ROI",
-            _volume.SeriesInstanceUid,
-            _volume.FrameOfReferenceUid,
-            string.Empty,
-            geometry,
-            buffer.ToStorage(),
-            new SegmentationMaskMetadata(
-                SegmentationMaskSourceKind.AutoRoi,
-                now,
-                now,
-                sourceMeasurementId: null,
-                notes: "Created from auto 3D ROI volume segmentation.",
-                revision: 0,
-                buffer.ComputeStatistics()));
+        return OutlineEngine.CreateSegmentationMaskFromRegion(_volume, region);
     }
 
     private bool TryBuildAutoOutlineMask(int seedX, int seedY, int sensitivityLevel, out AutoOutlineMask mask)

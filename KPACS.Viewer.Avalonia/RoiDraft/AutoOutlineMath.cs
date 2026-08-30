@@ -362,4 +362,14 @@ internal static class AutoOutlineMath
         double dy = second.Y - first.Y;
         return Math.Sqrt((dx * dx) + (dy * dy));
     }
+
+    /// <summary>Decodes a flat voxel index (z·sizeY·sizeX + y·sizeX + x) back to (x, y, z).</summary>
+    internal static void DecodeVoxelKey(int key, int sizeX, int sizeY, out int x, out int y, out int z)
+    {
+        int sliceSize = sizeX * sizeY;
+        z = key / sliceSize;
+        int withinSlice = key % sliceSize;
+        y = withinSlice / sizeX;
+        x = withinSlice % sizeX;
+    }
 }
