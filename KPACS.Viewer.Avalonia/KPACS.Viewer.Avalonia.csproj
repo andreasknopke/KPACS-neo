@@ -60,4 +60,11 @@
     </Content>
   </ItemGroup>
 
+  <!-- Allow the unit-test assembly to reach internal types (OutlineEngine, AutoOutlineMath,
+       VolumeRoiDraft, AutoOutlineSliceSource). These are internal to the viewer by design;
+       the test project is the second consumer that justifies exposing them. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="KPACS.Viewer.Avalonia.Tests" />
+  </ItemGroup>
+
 </Project>

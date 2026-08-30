@@ -3,6 +3,7 @@ using Avalonia.Controls.Shapes;
 using Avalonia.Input;
 using Avalonia.Media;
 using KPACS.Viewer.Models;
+using KPACS.Viewer.RoiDraft;
 using SpatialVector3D = KPACS.Viewer.Models.Vector3D;
 
 namespace KPACS.Viewer.Controls;
@@ -601,50 +602,10 @@ public partial class DicomViewPanel
     private VolumeRoiDraft? CloneVolumeRoiDraftState() =>
         _volumeRoiDraft is null ? null : CloneVolumeRoiDraft(_volumeRoiDraft);
 
-    private static VolumeRoiDraft CloneVolumeRoiDraft(VolumeRoiDraft draft)
-    {
-        VolumeRoiDraft clone = new(
-            draft.SeriesInstanceUid,
-            draft.FrameOfReferenceUid,
-            draft.AcquisitionNumber,
-            draft.ReferenceNormal,
-            draft.FirstPlanePosition,
-            draft.FirstSourceFilePath,
-            draft.FirstSopInstanceUid)
-        {
-            CurrentHoverPoint = draft.CurrentHoverPoint,
-            AutoOutlineState = draft.AutoOutlineState is null ? null : new VolumeRoiAutoOutlineState(draft.AutoOutlineState.ImagePoint, draft.AutoOutlineState.SensitivityLevel),
-            AdditiveModeEnabled = draft.AdditiveModeEnabled,
-            PendingAddContour = draft.PendingAddContour is null ? null : CloneVolumeRoiDraftContour(draft.PendingAddContour),
-            SegmentationMask = draft.SegmentationMask,
-            NextComponentId = draft.NextComponentId,
-            ActiveAddComponentId = draft.ActiveAddComponentId,
-        };
+    // Deep-clone now lives on the model (RoiDraft/VolumeRoiDraft.cs). Thin forwarders keep call sites.
+    private static VolumeRoiDraft CloneVolumeRoiDraft(VolumeRoiDraft draft) => draft.Clone();
 
-        foreach ((string key, VolumeRoiDraftContour contour) in draft.Contours)
-        {
-            clone.Contours[key] = CloneVolumeRoiDraftContour(contour);
-        }
-
-        return clone;
-    }
-
-    private static VolumeRoiDraftContour CloneVolumeRoiDraftContour(VolumeRoiDraftContour contour) =>
-        new(
-            contour.SliceKey,
-            contour.ContourKey,
-            contour.ComponentId,
-            contour.SourceFilePath,
-            contour.ReferencedSopInstanceUid,
-            contour.PlaneOrigin,
-            contour.RowDirection,
-            contour.ColumnDirection,
-            contour.Normal,
-            contour.PlanePosition,
-            contour.RowSpacing,
-            contour.ColumnSpacing,
-            contour.Anchors.ToList(),
-            contour.IsClosed);
+    private static VolumeRoiDraftContour CloneVolumeRoiDraftContour(VolumeRoiDraftContour contour) => contour.Clone();
 
     private void ApplyVolumeRoiDraftState(VolumeRoiDraft? draft)
     {
@@ -1005,95 +966,4 @@ public partial class DicomViewPanel
         string OrientationLabel,
         double CurrentPlanePosition,
         VolumeRoiDraftPreview Preview);
-
-    private sealed class VolumeRoiDraft(
-        string seriesInstanceUid,
-        string frameOfReferenceUid,
-        string acquisitionNumber,
-        SpatialVector3D referenceNormal,
-        double firstPlanePosition,
-        string firstSourceFilePath,
-        string firstSopInstanceUid)
-    {
-        public string SeriesInstanceUid { get; } = seriesInstanceUid;
-        public string FrameOfReferenceUid { get; } = frameOfReferenceUid;
-        public string AcquisitionNumber { get; } = acquisitionNumber;
-        public SpatialVector3D ReferenceNormal { get; } = referenceNormal;
-        public double FirstPlanePosition { get; } = firstPlanePosition;
-        public string FirstSourceFilePath { get; } = firstSourceFilePath;
-        public string FirstSopInstanceUid { get; } = firstSopInstanceUid;
-        public Dictionary<string, VolumeRoiDraftContour> Contours { get; } = new(StringComparer.Ordinal);
-        public Point? CurrentHoverPoint { get; set; }
-        public VolumeRoiAutoOutlineState? AutoOutlineState { get; set; }
-        public bool AdditiveModeEnabled { get; set; }
-        public VolumeRoiDraftContour? PendingAddContour { get; set; }
-        public SegmentationMask3D? SegmentationMask { get; set; }
-        public int NextComponentId { get; set; } = 1;
-        public int? ActiveAddComponentId { get; set; }
-    }
-
-    private sealed record VolumeRoiAutoOutlineState(Point ImagePoint, int SensitivityLevel);
-
-    private sealed class VolumeRoiDraftContour(
-        string sliceKey,
-        string contourKey,
-        int componentId,
-        string sourceFilePath,
-        string referencedSopInstanceUid,
-        SpatialVector3D planeOrigin,
-        SpatialVector3D rowDirection,
-        SpatialVector3D columnDirection,
-        SpatialVector3D normal,
-        double planePosition,
-        double rowSpacing,
-        double columnSpacing,
-        List<MeasurementAnchor> anchors,
-        bool isClosed)
-    {
-        public string SliceKey { get; } = sliceKey;
-        public string ContourKey { get; } = contourKey;
-        public int ComponentId { get; } = componentId;
-        public string SourceFilePath { get; } = sourceFilePath;
-        public string ReferencedSopInstanceUid { get; } = referencedSopInstanceUid;
-        public SpatialVector3D PlaneOrigin { get; } = planeOrigin;
-        public SpatialVector3D RowDirection { get; } = rowDirection;
-        public SpatialVector3D ColumnDirection { get; } = columnDirection;
-        public SpatialVector3D Normal { get; } = normal;
-        public double PlanePosition { get; } = planePosition;
-        public double RowSpacing { get; } = rowSpacing;
-        public double ColumnSpacing { get; } = columnSpacing;
-        public List<MeasurementAnchor> Anchors { get; } = anchors;
-        public bool IsClosed { get; set; } = isClosed;
-
-        public bool TryProjectTo(DicomSpatialMetadata metadata, out Point[] imagePoints)
-        {
-            imagePoints = [];
-            if (Anchors.Count == 0)
-            {
-                return false;
-            }
-
-            // Quick reject on first anchor — all anchors share the same geometric plane.
-            double planeTolerance = Math.Max(0.75, Math.Min(metadata.RowSpacing, metadata.ColumnSpacing));
-            if (Anchors[0].PatientPoint is not { } firstPatientPoint ||
-                metadata.DistanceToPlane(firstPatientPoint) > planeTolerance)
-            {
-                return false;
-            }
-
-            Point[] points = new Point[Anchors.Count];
-            for (int i = 0; i < Anchors.Count; i++)
-            {
-                if (Anchors[i].PatientPoint is null)
-                {
-                    return false;
-                }
-
-                points[i] = metadata.PixelPointFromPatient(Anchors[i].PatientPoint!.Value);
-            }
-
-            imagePoints = points;
-            return true;
-        }
-    }
 }

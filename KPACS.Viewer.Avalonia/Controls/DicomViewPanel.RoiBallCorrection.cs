@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Input;
 using KPACS.Viewer.Models;
+using KPACS.Viewer.RoiDraft;
 using KPACS.Viewer.Services;
 using SpatialVector3D = KPACS.Viewer.Models.Vector3D;
 
