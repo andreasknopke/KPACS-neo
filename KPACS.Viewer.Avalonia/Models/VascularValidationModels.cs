@@ -84,6 +84,10 @@ public sealed record VascularValidationSnapshot
                 new VascularPerformanceBudget { Key = "centerline-calculation", Title = "Centerline calculation", TargetLatencyMs = 1500 },
                 new VascularPerformanceBudget { Key = "cross-section-scrub", Title = "Cross-section scrub", TargetLatencyMs = 120 },
                 new VascularPerformanceBudget { Key = "curved-mpr-update", Title = "Curved MPR update", TargetLatencyMs = 250 },
+                new VascularPerformanceBudget { Key = "edt-calculation", Title = "EDT calculation", TargetLatencyMs = 800 },
+                new VascularPerformanceBudget { Key = "lumen-segmentation", Title = "Lumen segmentation", TargetLatencyMs = 10_000 },
+                new VascularPerformanceBudget { Key = "chart-update", Title = "Diameter chart update", TargetLatencyMs = 100 },
+                new VascularPerformanceBudget { Key = "graft-overlay-rebuild", Title = "Graft overlay rebuild", TargetLatencyMs = 150 },
             ],
         };
     }

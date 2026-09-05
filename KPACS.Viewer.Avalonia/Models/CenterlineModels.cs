@@ -140,6 +140,17 @@ public sealed record CenterlinePathPoint
 {
     public Vector3D PatientPoint { get; init; }
     public double ArcLengthMm { get; init; }
+
+    /// <summary>
+    /// Max-inscribed-sphere radius (mm) at this point, when the producing service computed one.
+    /// Null for legacy paths and seed previews.
+    /// </summary>
+    public double? RadiusMm { get; init; }
+
+    /// <summary>
+    /// Local curvature (1/mm) at this point, when available. Null for legacy paths.
+    /// </summary>
+    public double? CurvaturePerMm { get; init; }
 }
 
 public sealed record CenterlinePath
@@ -155,6 +166,22 @@ public sealed record CenterlinePath
     public string Summary { get; init; } = string.Empty;
     public DateTimeOffset CreatedUtc { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedUtc { get; init; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// Per-point max-inscribed-sphere radius (mm), parallel to <see cref="Points"/> when the
+    /// producing service computed one. Null for legacy paths and seed previews.
+    /// </summary>
+    public double[]? RadiiMm { get; init; }
+
+    /// <summary>
+    /// Per-point curvature (1/mm), parallel to <see cref="Points"/> when available.
+    /// </summary>
+    public double[]? Curvatures { get; init; }
+
+    /// <summary>
+    /// Per-point tortuosity contribution (arc-length ratio), parallel to <see cref="Points"/> when available.
+    /// </summary>
+    public double[]? Tortuosities { get; init; }
 
     public bool HasRenderablePath => Points.Count >= 2;
 

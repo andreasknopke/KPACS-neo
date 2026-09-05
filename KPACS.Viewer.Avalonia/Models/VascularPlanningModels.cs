@@ -64,6 +64,80 @@ public sealed record VascularPlanningMetrics
     public double? NeckAngulationDegrees { get; init; }
 
     public string Summary { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Phase C2: neck taper (mm diameter change per 10 mm of neck length) with status.
+    /// Null when the neck span has too few diameter samples to fit a slope.
+    /// </summary>
+    public VascularConicityMetrics? NeckConicity { get; init; }
+
+    /// <summary>
+    /// Phase C2: largest equivalent diameter found across the aneurysm sac span
+    /// (distal-landing start up to the proximal-neck end). Null when no sac samples exist.
+    /// </summary>
+    public double? AneurysmMaxDiameterMm { get; init; }
+
+    /// <summary>
+    /// Phase C2: thrombus volume inside the proximal-neck span, in cm³. Null when no
+    /// thrombus sub-mask was supplied.
+    /// </summary>
+    public double? NeckThrombusVolumeCm3 { get; init; }
+
+    /// <summary>
+    /// Phase C2: calcium volume inside the proximal-neck span, in cm³. Null when no
+    /// calcium sub-mask was supplied.
+    /// </summary>
+    public double? NeckCalciumVolumeCm3 { get; init; }
+
+    /// <summary>
+    /// Phase C2: per-side iliac access-route assessment (left/right). Empty when no
+    /// access-path centerlines are available.
+    /// </summary>
+    public List<VascularAccessPathMetrics> AccessPaths { get; init; } = [];
+}
+
+/// <summary>
+/// Phase C2: clinical severity of a single EVAR planning metric against the reference table.
+/// </summary>
+public enum VascularMetricStatus
+{
+    Unknown = 0,
+    Ok = 1,
+    Warning = 2,
+    Critical = 3,
+}
+
+/// <summary>
+/// Phase C2: neck conicity (taper) — the magnitude of the diameter slope across the neck,
+/// normalised to mm of diameter change per 10 mm of neck length.
+/// </summary>
+public sealed record VascularConicityMetrics
+{
+    public double? ConicityMmPer10Mm { get; init; }
+
+    public VascularMetricStatus Status { get; init; } = VascularMetricStatus.Unknown;
+}
+
+/// <summary>
+/// Phase C2: iliac access-route assessment for one side of the pelvis.
+/// </summary>
+public sealed record VascularAccessPathMetrics
+{
+    /// <summary>"Left" or "Right" (or a preset label). Display-only.</summary>
+    public string Side { get; init; } = string.Empty;
+
+    public double? MinEquivalentDiameterMm { get; init; }
+
+    public double? LengthMm { get; init; }
+
+    /// <summary>Arc length / straight chord. 1.0 = perfectly straight; higher = more tortuous.</summary>
+    public double? Tortuosity { get; init; }
+
+    /// <summary>Calcium volume / lumen volume within the path extent. 0..1. Null when no calcium mask.</summary>
+    public double? CalciumFraction { get; init; }
+
+    /// <summary>Worst status across the individual access-path criteria.</summary>
+    public VascularMetricStatus Status { get; init; } = VascularMetricStatus.Unknown;
 }
 
 public sealed record VascularPlanningBundle

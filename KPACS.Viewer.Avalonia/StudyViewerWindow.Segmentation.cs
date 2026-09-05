@@ -25,6 +25,7 @@ using KPACS.Viewer.Models;
 using KPACS.Viewer.Plugins;
 using KPACS.Viewer.Rendering;
 using KPACS.Viewer.Services;
+using KPACS.Viewer.Services.VesselAnalysis;
 using System.Globalization;
 using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
@@ -109,38 +110,202 @@ public partial class StudyViewerWindow
     /// Build the "Segmentation" section for the anatomy workspace panel.
     /// Called from <see cref="RefreshAnatomyPanel"/>.
     /// </summary>
+    /// <summary>
+    /// Lazily creates the <see cref="PluginManager"/> and runs synchronous local plugin
+    /// discovery (plus fire-and-forget remote registration in thin-client mode). Safe to
+    /// call repeatedly; the heavy work runs only once. Shared by the anatomy Segmentation
+    /// panel and the Vascular Workspace auto-segmentation entry point.
+    /// </summary>
+    private void EnsurePluginManagerInitialized()
+    {
+        if (_pluginManager is not null || _pluginDiscoveryStarted)
+        {
+            return;
+        }
+
+        _pluginDiscoveryStarted = true;
+
+        string scratchRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "KPACS.Viewer.Avalonia", "plugin-scratch");
+
+        string appDir = (Application.Current as App)?.Paths.ApplicationDirectory
+            ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+
+        _pluginManager = new PluginManager(scratchRoot, dataDirectory: appDir);
+
+        // Synchronous local discovery.
+        string localPluginDir = Path.Combine(AppContext.BaseDirectory, "Plugins");
+        int localCount = _pluginManager.DiscoverPlugins(localPluginDir);
+        System.Diagnostics.Debug.WriteLine(
+            $"[Segmentation] Discovered {localCount} local plugin(s) from {localPluginDir}");
+
+        string userPluginDir = Path.Combine(appDir, "Plugins");
+        _pluginManager.DiscoverPlugins(userPluginDir);
+
+        // Async remote plugin registration (thin-client mode) — fire-and-forget,
+        // refresh the panel when done.
+        if (IsRenderServerStudy && _context.RenderServerConnection is not null)
+        {
+            _ = RegisterRemotePluginsAndRefreshAsync();
+        }
+    }
+
+    /// <summary>
+    /// Public seam for the Vascular Workspace (Phase B2): runs the TotalSegmentator
+    /// <c>total_fast</c> task on the given volume and returns the aorta + iliac-artery
+    /// masks. Reuses the established plugin/progress/import pipeline. Returns an empty
+    /// list when no segmentation plugin is available or the run yields no vascular masks.
+    /// </summary>
+    public Task<IReadOnlyList<SegmentationMask3D>> RunVascularAutoSegmentationAsync(
+        SeriesVolume volume,
+        IProgress<ProgressReport>? progress,
+        CancellationToken cancellationToken) =>
+        RunVascularAutoSegmentationCoreAsync(volume, progress, cancellationToken);
+
+    private async Task<IReadOnlyList<SegmentationMask3D>> RunVascularAutoSegmentationCoreAsync(
+        SeriesVolume volume,
+        IProgress<ProgressReport>? progress,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(volume);
+
+        EnsurePluginManagerInitialized();
+
+        PluginInstance? instance = _pluginManager?.GetPlugins(PluginCapability.Segmentation)
+            .FirstOrDefault(p => string.Equals(p.Manifest.Id, "totalsegmentator", StringComparison.OrdinalIgnoreCase))
+            ?? _pluginManager?.GetPlugins(PluginCapability.Segmentation).FirstOrDefault();
+
+        if (_pluginManager is null || instance is null)
+        {
+            return [];
+        }
+
+        ISegmentationProvider provider =
+            await _pluginManager.GetSegmentationProviderAsync(instance.Manifest.Id, cancellationToken);
+
+        // Prefer the fast task; fall back to the first available task.
+        string taskId = provider.AvailableTasks.Any(t => t.Id == "total_fast")
+            ? "total_fast"
+            : provider.AvailableTasks.FirstOrDefault()?.Id ?? "total_fast";
+
+        string studyUid = _context.StudyDetails.Study.StudyInstanceUid;
+        string outputDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "KPACS.Viewer.Avalonia", "seg-output", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outputDir);
+
+        SharedRawVolumeHandle? sharedVolumeHandle = null;
+        try
+        {
+            bool isRemotePlugin = instance.Handle is RemotePluginAdapter;
+            string volumeFilePath = string.Empty;
+            string volumeFormat = "nifti";
+            Dictionary<string, string> requestParameters = [];
+
+            if (!isRemotePlugin)
+            {
+                progress?.Report(new ProgressReport
+                {
+                    Step = 0,
+                    TotalSteps = 5,
+                    PercentComplete = 3,
+                    StatusMessage = "Publishing shared-memory volume…",
+                });
+
+                sharedVolumeHandle = await Task.Run(() => CreateSharedRawVolume(volume), cancellationToken);
+                volumeFilePath = sharedVolumeHandle.MapName;
+                volumeFormat = "raw";
+                requestParameters = CreateRawVolumeParameters(volume);
+                requestParameters["kpacs.raw.transport"] = "shm";
+                requestParameters["kpacs.raw.map_name"] = sharedVolumeHandle.MapName;
+            }
+            else if (instance.Handle is RemotePluginAdapter remoteAdapter)
+            {
+                ViewportSlot? slot = _activeSlot;
+                if (slot?.Series is not null &&
+                    TryGetCachedRemoteRenderBackend(slot.Series, out RemoteRenderBackend? backend) &&
+                    backend is not null)
+                {
+                    remoteAdapter.SessionId = backend.SessionId;
+                    remoteAdapter.VolumeId = backend.VolumeId;
+                }
+            }
+
+            var request = new SegmentationRequest
+            {
+                Volume = new VolumeDescriptor
+                {
+                    FilePath = volumeFilePath,
+                    Format = volumeFormat,
+                    Dimensions = [volume.SizeX, volume.SizeY, volume.SizeZ],
+                    SpacingMm = [volume.SpacingX, volume.SpacingY, volume.SpacingZ],
+                    Modality = _activeSlot?.Series?.Modality ?? string.Empty,
+                    SeriesInstanceUid = volume.SeriesInstanceUid,
+                },
+                TaskId = taskId,
+                OutputDirectory = outputDir,
+                Device = "gpu",
+                ProduceMultilabel = true,
+                Parameters = requestParameters,
+            };
+
+            SegmentationResult result = await provider.RunAsync(request, progress, cancellationToken);
+            if (!result.Success)
+            {
+                return [];
+            }
+
+            List<SegmentationMask3D> vascular = [];
+
+            if (instance.Handle is RemotePluginAdapter remoteForMasks)
+            {
+                foreach (SegmentedStructure structure in result.Structures)
+                {
+                    if (string.IsNullOrEmpty(structure.MaskPath))
+                    {
+                        continue;
+                    }
+
+                    SegmentationMask3D? mask = await remoteForMasks.DownloadMaskAsync(
+                        structure.MaskPath,
+                        structure.DisplayName ?? structure.Id,
+                        volume.SeriesInstanceUid,
+                        studyUid,
+                        cancellationToken);
+
+                    if (mask is not null && VascularSegmentationHelper.IsVascularStructure(mask.Name))
+                    {
+                        vascular.Add(mask);
+                    }
+                }
+            }
+            else if (!string.IsNullOrEmpty(result.MultilabelPath) && File.Exists(result.MultilabelPath))
+            {
+                IReadOnlyList<SegmentationMask3D> masks =
+                    await Task.Run(() => NiftiMaskConverter.FromMultilabelNiftiAll(
+                        result.MultilabelPath, result.Structures, volume, studyUid, progress), cancellationToken);
+
+                vascular.AddRange(VascularSegmentationHelper.FilterVascular(masks));
+            }
+
+            return vascular;
+        }
+        finally
+        {
+            sharedVolumeHandle?.Dispose();
+            _ = Task.Run(() =>
+            {
+                try { Directory.Delete(outputDir, recursive: true); }
+                catch { /* best-effort */ }
+            }, CancellationToken.None);
+        }
+    }
+
     private Control BuildSegmentationSection()
     {
         // Lazily create the plugin manager and run synchronous local discovery.
-        if (_pluginManager is null && !_pluginDiscoveryStarted)
-        {
-            _pluginDiscoveryStarted = true;
-
-            string scratchRoot = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "KPACS.Viewer.Avalonia", "plugin-scratch");
-
-            string appDir = (Application.Current as App)?.Paths.ApplicationDirectory
-                ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-
-            _pluginManager = new PluginManager(scratchRoot, dataDirectory: appDir);
-
-            // Synchronous local discovery.
-            string localPluginDir = Path.Combine(AppContext.BaseDirectory, "Plugins");
-            int localCount = _pluginManager.DiscoverPlugins(localPluginDir);
-            System.Diagnostics.Debug.WriteLine(
-                $"[Segmentation] Discovered {localCount} local plugin(s) from {localPluginDir}");
-
-            string userPluginDir = Path.Combine(appDir, "Plugins");
-            _pluginManager.DiscoverPlugins(userPluginDir);
-
-            // Async remote plugin registration (thin-client mode) — fire-and-forget,
-            // refresh the panel when done.
-            if (IsRenderServerStudy && _context.RenderServerConnection is not null)
-            {
-                _ = RegisterRemotePluginsAndRefreshAsync();
-            }
-        }
+        EnsurePluginManagerInitialized();
 
         IReadOnlyCollection<PluginInstance> allPlugins = _pluginManager?.Plugins ?? [];
         IReadOnlyList<PluginInstance> segmentationPlugins = allPlugins

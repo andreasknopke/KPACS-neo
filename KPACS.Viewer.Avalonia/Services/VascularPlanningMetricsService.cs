@@ -1,5 +1,6 @@
 using KPACS.Viewer.Models;
 using KPACS.Viewer.Rendering;
+using KPACS.Viewer.Services.VesselAnalysis;
 
 namespace KPACS.Viewer.Services;
 
@@ -25,6 +26,18 @@ internal sealed class VascularPlanningMetricsService : IVascularPlanningMetricsS
         VascularSpanMetrics? distalLanding = TryComputeSpanMetrics(path, bundle.GetMarker(VascularPlanningMarkerKind.DistalLandingStart), bundle.GetMarker(VascularPlanningMarkerKind.DistalLandingEnd), buffer);
         double? neckAngulation = TryComputeNeckAngulation(path, bundle.GetMarker(VascularPlanningMarkerKind.ProximalNeckStart), bundle.GetMarker(VascularPlanningMarkerKind.ProximalNeckEnd));
 
+        // Phase C2: neck conicity from the neck span's diameter samples (arc-length vs Øeq slope).
+        VascularConicityMetrics neckConicity = VascularExtendedMetricsHelper.BuildConicity(
+            ComputeConicityFromSamples(proximalNeck));
+
+        // Phase C2: aneurysm-sac maximum equivalent diameter — the widest Øeq between the
+        // proximal-neck end and the distal-landing start (the segment the sac occupies).
+        double? aneurysmMaxDiameterMm = TryComputeSacMaxDiameter(
+            path,
+            bundle.GetMarker(VascularPlanningMarkerKind.ProximalNeckEnd),
+            bundle.GetMarker(VascularPlanningMarkerKind.DistalLandingStart),
+            buffer);
+
         string summary = BuildSummary(proximalNeck, distalLanding, neckAngulation);
         return new VascularPlanningMetrics
         {
@@ -32,7 +45,52 @@ internal sealed class VascularPlanningMetricsService : IVascularPlanningMetricsS
             DistalLanding = distalLanding,
             NeckAngulationDegrees = neckAngulation,
             Summary = summary,
+            NeckConicity = neckConicity,
+            AneurysmMaxDiameterMm = aneurysmMaxDiameterMm,
         };
+    }
+
+    private static double? ComputeConicityFromSamples(VascularSpanMetrics? span)
+    {
+        if (span?.Samples is null || span.Samples.Count < 2)
+        {
+            return null;
+        }
+
+        List<(double ArcLengthMm, double DiameterMm)> tuples = new(span.Samples.Count);
+        foreach (VascularDiameterSample sample in span.Samples)
+        {
+            tuples.Add((sample.ArcLengthMm, sample.EquivalentDiameterMm));
+        }
+
+        return VascularExtendedMetricsHelper.ComputeConicityMmPer10Mm(tuples);
+    }
+
+    private static double? TryComputeSacMaxDiameter(CenterlinePath path, VascularPlanningMarker? sacStart, VascularPlanningMarker? sacEnd, SegmentationMaskBuffer buffer)
+    {
+        if (sacStart is null || sacEnd is null || path.Points.Count == 0)
+        {
+            return null;
+        }
+
+        int startIndex = Math.Clamp(Math.Min(sacStart.StationIndex, sacEnd.StationIndex), 0, path.Points.Count - 1);
+        int endIndex = Math.Clamp(Math.Max(sacStart.StationIndex, sacEnd.StationIndex), 0, path.Points.Count - 1);
+
+        double max = double.NegativeInfinity;
+        bool any = false;
+        foreach (int sampleIndex in BuildSampleIndices(startIndex, endIndex))
+        {
+            CrossSectionMeasurement? measurement = MeasureCrossSection(path, sampleIndex, buffer);
+            if (measurement is null)
+            {
+                continue;
+            }
+
+            any = true;
+            max = Math.Max(max, measurement.Value.EquivalentDiameterMm);
+        }
+
+        return any ? max : null;
     }
 
     private static VascularSpanMetrics? TryComputeSpanMetrics(CenterlinePath path, VascularPlanningMarker? start, VascularPlanningMarker? end, SegmentationMaskBuffer buffer)

@@ -84,7 +84,7 @@ public partial class StudyViewerWindow
         CenterlineCrossSectionPinButton.IsChecked = _centerlineCrossSectionPinned;
         CenterlineCrossSectionTitleText.Text = "Centerline cross-section";
         CenterlineCrossSectionSummaryText.Text = $"{seedSet.Label} · {path.Summary}";
-        CenterlineCrossSectionHintText.Text = "Scrub along the centerline to inspect orthogonal vessel sections. Use the marker buttons to capture neck and distal landing spans; the current station is synchronized back into the native views via the 3D cursor.";
+        CenterlineCrossSectionHintText.Text = "Scrub along the centerline to inspect orthogonal vessel sections. Use the marker buttons to capture neck and distal landing spans; the current station is synchronized back into the native views via the 3D cursor. For guided EVAR planning (Segmentation, Centerline, Measurements, Sizing, Report) the dedicated Vascular Workspace is available via the toolbar 'Vascular' button.";
         ApplyCenterlineCrossSectionPanelOffset();
 
         // Schedule the heavy rendering work off the UI thread.

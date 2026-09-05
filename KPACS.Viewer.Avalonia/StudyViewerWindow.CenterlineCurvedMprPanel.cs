@@ -86,7 +86,7 @@ public partial class StudyViewerWindow
         int stationIndex = GetSelectedCenterlineStationIndex(path);
         UpdateCenterlineCurvedMprStationIndicator(path, stationIndex);
         CenterlineCurvedMprStatusText.Text = BuildCenterlineCurvedMprStatusText(path, stationIndex);
-        CenterlineCurvedMprHintText.Text = $"Rotate around the vessel axis to align the stretched CPR with the anatomy you want to inspect. Click or drag in the image to move the shared centerline station and keep the orthogonal cross-section synchronized. {BuildSelectedVascularPlanningSummary()}";
+        CenterlineCurvedMprHintText.Text = $"Rotate around the vessel axis to align the stretched CPR with the anatomy you want to inspect. Click or drag in the image to move the shared centerline station and keep the orthogonal cross-section synchronized. {BuildSelectedVascularPlanningSummary()} For guided EVAR planning (Segmentation, Centerline, Measurements, Sizing, Report) the dedicated Vascular Workspace is available via the toolbar 'Vascular' button.";
         ApplyCenterlineCurvedMprPanelOffset();
         ScheduleCenterlineCurvedMprRender(path, volume);
     }

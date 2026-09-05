@@ -42,6 +42,33 @@ public sealed class SegmentationMaskBuffer
         return (_bits[byteIndex] & bitMask) != 0;
     }
 
+    /// <summary>
+    /// Read the foreground bit at a raw linear index (x-fastest, then y, then z).
+    /// Callers are responsible for keeping the index within <see cref="Geometry"/> bounds.
+    /// </summary>
+    public bool GetLinear(int linearIndex)
+    {
+        (int byteIndex, byte bitMask) = GetByteIndex(linearIndex);
+        return (_bits[byteIndex] & bitMask) != 0;
+    }
+
+    /// <summary>
+    /// Write the foreground bit at a raw linear index (x-fastest, then y, then z).
+    /// Callers are responsible for keeping the index within <see cref="Geometry"/> bounds.
+    /// </summary>
+    public void SetLinear(int linearIndex, bool value)
+    {
+        (int byteIndex, byte bitMask) = GetByteIndex(linearIndex);
+        if (value)
+        {
+            _bits[byteIndex] |= bitMask;
+        }
+        else
+        {
+            _bits[byteIndex] &= (byte)~bitMask;
+        }
+    }
+
     public void Set(int x, int y, int z, bool value)
     {
         int linearIndex = GetLinearIndex(x, y, z);

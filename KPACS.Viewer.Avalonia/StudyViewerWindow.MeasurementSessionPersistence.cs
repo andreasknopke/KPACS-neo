@@ -10,7 +10,7 @@ namespace KPACS.Viewer;
 public partial class StudyViewerWindow
 {
     private const int MeasurementSessionSaveDebounceMs = 700;
-    private const int MeasurementSessionFormatVersion = 4;
+    private const int MeasurementSessionFormatVersion = 5;
     private const int MaxPersistedSegmentationMaskBytes = 1_048_576;
 
     private readonly DispatcherTimer _measurementSessionSaveDebounceTimer = new();
@@ -249,6 +249,7 @@ public partial class StudyViewerWindow
             }
 
             _vascularValidationSnapshot = envelope.VascularValidationSnapshot?.EnsureDefaults() ?? VascularValidationSnapshot.CreateDefault();
+            _vascularWorkspaceSnapshot = envelope.VascularWorkspaceSnapshot;
 
             _selectedMeasurementId = envelope.SelectedMeasurementId is Guid selectedMeasurementId &&
                 _studyMeasurements.Any(measurement => measurement.Id == selectedMeasurementId)
@@ -299,6 +300,7 @@ public partial class StudyViewerWindow
             CenterlinePaths = [.. _centerlinePaths.Values.OrderBy(path => path.CreatedUtc)],
             VascularPlanningBundles = [.. _vascularPlanningBundles.Values.OrderBy(bundle => bundle.CreatedUtc)],
             VascularValidationSnapshot = _vascularValidationSnapshot.EnsureDefaults(),
+            VascularWorkspaceSnapshot = _vascularWorkspaceSnapshot,
             WorkspaceState = BuildMeasurementSessionWorkspaceState(),
         };
     }
@@ -396,6 +398,7 @@ public partial class StudyViewerWindow
         _centerlinePaths.Clear();
         _vascularPlanningBundles.Clear();
         _vascularValidationSnapshot = VascularValidationSnapshot.CreateDefault();
+        _vascularWorkspaceSnapshot = null;
         _pendingMeasurementSessionWorkspaceState = null;
         _polygonAutoOutlineStates.Clear();
         _reportRegionOverrides.Clear();
@@ -452,6 +455,7 @@ public partial class StudyViewerWindow
         public List<CenterlinePath> CenterlinePaths { get; set; } = [];
         public List<VascularPlanningBundle> VascularPlanningBundles { get; set; } = [];
         public VascularValidationSnapshot? VascularValidationSnapshot { get; set; }
+        public VascularWorkspaceSnapshot? VascularWorkspaceSnapshot { get; set; }
         public MeasurementSessionWorkspaceState? WorkspaceState { get; set; }
     }
 

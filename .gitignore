@@ -30,3 +30,8 @@ KPACS.sln
 release/
 artifacts/publish-release-*/
 artifacts/publish-release-singlefile-test/
+artifacts/publish-single-win-x64/
+
+# Python plugin caches
+__pycache__/
+*.pyc

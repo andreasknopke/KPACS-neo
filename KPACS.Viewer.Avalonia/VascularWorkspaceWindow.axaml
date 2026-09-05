@@ -1,0 +1,161 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="KPACS.Viewer.VascularWorkspaceWindow"
+        Title="Vascular Workspace"
+        Icon="/Assets/Branding/k-pacs.png"
+        Width="1600" Height="980"
+        MinWidth="1100" MinHeight="720"
+        WindowStartupLocation="CenterOwner"
+        Background="#FF141414">
+    <Window.Styles>
+        <Style Selector="Button.vwMode">
+            <Setter Property="Background" Value="#FF2A2A2A" />
+            <Setter Property="Foreground" Value="#FFE5E5E5" />
+            <Setter Property="Padding" Value="18,10" />
+            <Setter Property="MinWidth" Value="120" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style Selector="Button.vwMode:checked">
+            <Setter Property="Background" Value="#FF1FA2D6" />
+            <Setter Property="Foreground" Value="White" />
+        </Style>
+        <Style Selector="RadioButton.vwStep">
+            <Setter Property="Background" Value="#FF262626" />
+            <Setter Property="Foreground" Value="#FFBFC9D2" />
+            <Setter Property="Padding" Value="14,8" />
+            <Setter Property="MinWidth" Value="130" />
+        </Style>
+        <Style Selector="RadioButton.vwStep:checked">
+            <Setter Property="Background" Value="#FFD9A03C" />
+            <Setter Property="Foreground" Value="Black" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style Selector="Border.vwViewport">
+            <Setter Property="Background" Value="#FF0C0C0C" />
+            <Setter Property="BorderBrush" Value="#FF303030" />
+            <Setter Property="BorderThickness" Value="1" />
+        </Style>
+        <Style Selector="TextBlock.vwViewportLabel">
+            <Setter Property="Foreground" Value="#FF97A8B7" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Margin" Value="6,4" />
+        </Style>
+        <Style Selector="TextBlock.vwSidebarHeader">
+            <Setter Property="Foreground" Value="#FF35C7FF" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="Margin" Value="0,0,0,8" />
+        </Style>
+    </Window.Styles>
+
+    <DockPanel LastChildFill="True">
+
+        <!-- Header: Modus-Umschalter + Schritt-Leiste -->
+        <Border DockPanel.Dock="Top" Background="#FF1C1C1C" Padding="12,8" BorderBrush="#FF303030" BorderThickness="0,0,0,1">
+            <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto" RowSpacing="8">
+                <StackPanel Grid.Row="0" Grid.Column="0" Orientation="Horizontal" Spacing="6">
+                    <RadioButton x:Name="ModeEvarButton" Classes="vwMode" GroupName="vwMode"
+                                 IsChecked="True" Content="EVAR / TEVAR" Checked="OnModeChanged" />
+                    <RadioButton x:Name="ModeTaviButton" Classes="vwMode" GroupName="vwMode"
+                                 Content="TAVI" Checked="OnModeChanged" />
+                </StackPanel>
+
+                <TextBlock Grid.Row="0" Grid.Column="2" x:Name="WorkspaceSubtitleText"
+                           VerticalAlignment="Center" Foreground="#FF97A8B7" FontSize="12"
+                           Text="Geführte Gefäß-Planung" />
+
+                <!-- EVAR Schritt-Leiste -->
+                <StackPanel x:Name="EvarStepBar" Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3"
+                            Orientation="Horizontal" Spacing="6">
+                    <RadioButton x:Name="EvarStep1" Classes="vwStep" GroupName="vwStep" IsChecked="True"
+                                 Content="1  Segmentierung" Checked="OnEvarStepChanged" />
+                    <RadioButton x:Name="EvarStep2" Classes="vwStep" GroupName="vwStep"
+                                 Content="2  Centerline" Checked="OnEvarStepChanged" />
+                    <RadioButton x:Name="EvarStep3" Classes="vwStep" GroupName="vwStep"
+                                 Content="3  Messungen" Checked="OnEvarStepChanged" />
+                    <RadioButton x:Name="EvarStep4" Classes="vwStep" GroupName="vwStep"
+                                 Content="4  Sizing" Checked="OnEvarStepChanged" />
+                    <RadioButton x:Name="EvarStep5" Classes="vwStep" GroupName="vwStep"
+                                 Content="5  Bericht" Checked="OnEvarStepChanged" />
+                </StackPanel>
+
+                <!-- TAVI Schritt-Leiste -->
+                <StackPanel x:Name="TaviStepBar" Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3"
+                            Orientation="Horizontal" Spacing="6" IsVisible="False">
+                    <RadioButton x:Name="TaviStep1" Classes="vwStep" GroupName="vwStep" IsChecked="True"
+                                 Content="1  Annulus" Checked="OnTaviStepChanged" />
+                    <RadioButton x:Name="TaviStep2" Classes="vwStep" GroupName="vwStep"
+                                 Content="2  Double-Oblique / Verkalkung" Checked="OnTaviStepChanged" />
+                    <RadioButton x:Name="TaviStep3" Classes="vwStep" GroupName="vwStep"
+                                 Content="3  Ostien / C-Arm" Checked="OnTaviStepChanged" />
+                    <RadioButton x:Name="TaviStep4" Classes="vwStep" GroupName="vwStep"
+                                 Content="4  Sizing / Bericht" Checked="OnTaviStepChanged" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Statusleiste unten -->
+        <Border DockPanel.Dock="Bottom" Background="#FF1C1C1C" Padding="12,6" BorderBrush="#FF303030" BorderThickness="0,1,0,0">
+            <TextBlock x:Name="StatusText" Foreground="#FF9FB0BE" FontSize="12" Text="Bereit" />
+        </Border>
+
+        <!-- Diameter-Chart-Streifen (einklappbar, Phase C) -->
+        <Border x:Name="ChartStrip" DockPanel.Dock="Bottom" Height="200" IsVisible="False"
+                Background="#FF101010" BorderBrush="#FF303030" BorderThickness="0,1,0,0">
+            <Grid RowDefinitions="Auto,*">
+                <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Background="#FF1A1A1A">
+                    <TextBlock Grid.Column="0" Classes="vwViewportLabel" Text="Diameter-Chart" />
+                    <Button Grid.Column="1" x:Name="CollapseChartButton" Content="✕" Padding="10,4"
+                            Margin="4" Click="OnToggleChartStripClick" ToolTip.Tip="Chart einklappen" />
+                </Grid>
+                <Border Grid.Row="1" x:Name="ChartHost" Margin="6" Background="#FF0C0C0C" />
+            </Grid>
+        </Border>
+
+        <!-- Hauptbereich: Viewport-Grid + Sidebar -->
+        <Grid ColumnDefinitions="*,320">
+
+            <!-- 2x2 Viewport-Grid -->
+            <Grid Grid.Column="0" Margin="6" RowDefinitions="*,*" ColumnDefinitions="*,*" RowSpacing="6" ColumnSpacing="6">
+                <Border Grid.Row="0" Grid.Column="0" Classes="vwViewport">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top" Classes="vwViewportLabel" Text="3D DVR (Angio)" />
+                        <ContentControl x:Name="DvrHost" />
+                    </DockPanel>
+                </Border>
+                <Border Grid.Row="0" Grid.Column="1" Classes="vwViewport">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top" Classes="vwViewportLabel" Text="MPR (axial / oblique)" />
+                        <ContentControl x:Name="MprHost" />
+                    </DockPanel>
+                </Border>
+                <Border Grid.Row="1" Grid.Column="0" Classes="vwViewport">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top" Classes="vwViewportLabel" Text="CPR (curved MPR)" />
+                        <ContentControl x:Name="CprHost" />
+                    </DockPanel>
+                </Border>
+                <Border Grid.Row="1" Grid.Column="1" Classes="vwViewport">
+                    <DockPanel>
+                        <TextBlock DockPanel.Dock="Top" Classes="vwViewportLabel" Text="Orthogonalschnitt" />
+                        <ContentControl x:Name="CrossSectionHost" />
+                    </DockPanel>
+                </Border>
+            </Grid>
+
+            <!-- Rechte Sidebar (aktiver Schritt) -->
+            <Border Grid.Column="1" Background="#FF181818" BorderBrush="#FF303030" BorderThickness="1,0,0,0">
+                <ScrollViewer>
+                    <StackPanel Margin="12" Spacing="10">
+                        <TextBlock x:Name="SidebarHeader" Classes="vwSidebarHeader" Text="Segmentierung" />
+                        <TextBlock x:Name="SidebarBody" Foreground="#FFC7D0D8" FontSize="12"
+                                   TextWrapping="Wrap"
+                                   Text="Wählen Sie eine Serie und starten Sie die Lumen-Segmentierung." />
+                        <ContentControl x:Name="StepPanelHost" />
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+        </Grid>
+    </DockPanel>
+</Window>

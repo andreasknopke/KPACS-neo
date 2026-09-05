@@ -49,7 +49,7 @@ string pluginScratchRoot = Path.Combine(
     "KPACS.RenderServer", "plugin-scratch");
 string pluginSearchPath = builder.Configuration["RenderServer:PluginDirectory"]
     ?? Path.Combine(AppContext.BaseDirectory, "Plugins");
-var pluginManager = new PluginManager(pluginScratchRoot, dataDirectory: null, hostVersion: "0.7.0");
+var pluginManager = new PluginManager(pluginScratchRoot, dataDirectory: null, hostVersion: "0.8.0");
 int pluginsFound = pluginManager.DiscoverPlugins(pluginSearchPath);
 builder.Services.AddSingleton(pluginManager);
 

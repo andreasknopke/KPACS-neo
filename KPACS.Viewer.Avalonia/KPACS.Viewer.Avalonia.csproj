@@ -6,9 +6,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>0.7.0</Version>
-    <AssemblyVersion>0.7.0.0</AssemblyVersion>
-    <FileVersion>0.7.0.0</FileVersion>
+    <Version>0.8.0</Version>
+    <AssemblyVersion>0.8.0.0</AssemblyVersion>
+    <FileVersion>0.8.0.0</FileVersion>
     <RootNamespace>KPACS.Viewer</RootNamespace>
     <AssemblyName>KPACS.Viewer</AssemblyName>
     <Description>K-PACS DICOM Viewer - Cross-platform viewer with Avalonia UI</Description>
@@ -26,6 +26,10 @@
     <PackageReference Include="OpenCL.Net" Version="2.1.0" />
     <PackageReference Include="Semi.Avalonia" Version="11.3.7.3" />
     <PackageReference Include="Semi.Avalonia.DataGrid" Version="11.3.7.3" />
+    <!-- Diameter-Chart (Phase C1). Pinned to the last 5.1.x that targets the Avalonia 11
+         line (>= 11.3.4). ScottPlot.Avalonia 5.1.59 was rejected by the compatibility
+         spike: it depends on Avalonia >= 12.0.0, which conflicts with the 11.3.7 pin. -->
+    <PackageReference Include="ScottPlot.Avalonia" Version="5.1.58" />
     <PackageReference Include="Google.Protobuf" Version="3.30.2" />
     <PackageReference Include="Grpc.Net.Client" Version="2.71.0" />
     <PackageReference Include="Grpc.Tools" Version="2.71.0" PrivateAssets="All" />

@@ -320,6 +320,12 @@
                                 <TextBlock Text="3D Dev" FontSize="11" />
                             </StackPanel>
                         </Button>
+                        <Button x:Name="WorkspaceVascularButton" Classes="workspaceAction" Click="OnWorkspaceVascularClick" ToolTip.Tip="Open the guided vascular workspace (EVAR/TEVAR and TAVI planning) for the active series.">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <TextBlock Text="VS" FontWeight="SemiBold" FontSize="11" />
+                                <TextBlock Text="Vascular" FontSize="11" />
+                            </StackPanel>
+                        </Button>
                         <Button x:Name="WorkspaceReportButton" Classes="workspaceAction" Click="OnWorkspaceReportClick" ToolTip.Tip="Open the floating report panel with created findings, source provenance, and anatomy hints.">
                             <StackPanel Orientation="Horizontal" Spacing="5">
                                 <TextBlock Text="RP" FontWeight="SemiBold" FontSize="11" />
